@@ -225,8 +225,8 @@ function downloadAudio(videoId, roomId) {
     const args = [
       '--no-playlist',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=ios,mweb,tv,android',
-      '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best',
+      '--extractor-args', 'youtube:player_client=android,mweb,web',
+      '-f', 'bestaudio/best',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',              // --print implies --simulate by default; override it
@@ -340,7 +340,7 @@ app.post('/download/:roomId', async (req, res) => {
   if (cachedFile) {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
-    const execArgs = ['--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=ios,mweb,tv,android', '--no-download', '--get-title'];
+    const execArgs = ['--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=android,mweb,web', '--no-download', '--get-title'];
     if (fs.existsSync(COOKIES_FILE)) execArgs.push('--cookies', COOKIES_FILE);
     execArgs.push(`https://www.youtube.com/watch?v=${videoId}`);
     execFile('yt-dlp', execArgs, (err, stdout) => {
