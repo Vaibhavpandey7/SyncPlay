@@ -266,13 +266,61 @@ ul{list-style:none}
 .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:9999;padding:12px 24px;border-radius:var(--r-sm);background:rgba(30,30,50,.95);color:var(--t1);font-size:.9rem;font-weight:500;border:1px solid var(--border);backdrop-filter:blur(20px);box-shadow:0 8px 40px rgba(0,0,0,.5);animation:toast-in .3s ease;white-space:nowrap}
 @keyframes toast-in{from{opacity:0;transform:translateX(-50%) translateY(12px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 
-/* Responsive */
-@media(max-width:700px){
-  .cards-row{flex-direction:column}
-  .divider-or{flex-direction:row;width:auto;height:40px}
-  .divider-or::before{width:100%;height:1px}
-  .room-main{flex-direction:column;padding:16px}
-  .player-section{padding-right:0;border-right:none;border-bottom:1px solid var(--border);padding-bottom:20px}
-  .users-panel{width:100%;padding-left:0;padding-top:20px}
-  .player-card{flex-direction:column;text-align:center}
+/* Responsive Mobile Optimization */
+@media (max-width: 768px) {
+  html { font-size: 15px; }
+
+  /* Prevent iOS Safari auto-zoom on input focus */
+  input[type="text"] {
+    font-size: 16px !important;
+  }
+
+  .landing-content { padding: 0 10px; gap: 24px; }
+  .logo-text { font-size: 2.2rem; }
+  .tagline { font-size: 0.98rem; }
+
+  .cards-row { flex-direction: column; gap: 16px; width: 100%; }
+  .card { padding: 24px 20px; }
+  .divider-or { flex-direction: row; width: 100%; height: 30px; }
+  .divider-or::before { width: 100%; height: 1px; }
+
+  .room-header { padding: 12px 16px; }
+  .header-logo span { font-size: 1rem; }
+  .room-id-badge { font-size: 0.88rem; letter-spacing: 2px; padding: 4px 8px; }
+  .btn-leave { padding: 6px 12px; font-size: 0.8rem; }
+
+  .room-main { flex-direction: column; padding: 16px 14px; gap: 20px; }
+  .player-section { padding-right: 0; border-right: none; border-bottom: 1px solid var(--border); padding-bottom: 24px; }
+  .users-panel { width: 100%; padding-left: 0; }
+
+  /* Touch-friendly buttons and inputs */
+  .btn { min-height: 46px; }
+  .tab { padding: 12px 14px; }
+
+  /* Mobile URL Row */
+  .url-row { flex-direction: column; gap: 8px; }
+  .url-row button { width: 100%; justify-content: center; height: 46px; }
+
+  /* Mobile Player Card & Controls */
+  .player-card { flex-direction: column; text-align: center; padding: 20px 16px; gap: 16px; }
+  .album-art { width: 90px; height: 90px; }
+  .np-title { font-size: 1rem; max-width: 100%; }
+
+  .controls-bar { padding: 16px; gap: 16px; }
+  .ctrl-btn { width: 48px; height: 48px; }
+  .ctrl-btn-main { width: 60px; height: 60px; }
+
+  /* Touch-friendly scrub bar */
+  .scrub-track { height: 8px; }
+  .scrub-knob { width: 18px; height: 18px; opacity: 1; }
+
+  /* Toast notification on mobile */
+  .toast { max-width: 92vw; white-space: normal; text-align: center; font-size: 0.85rem; padding: 10px 16px; bottom: 20px; }
+}
+
+@media (max-width: 400px) {
+  .logo-text { font-size: 1.8rem; }
+  .room-header { padding: 10px 12px; }
+  .room-info { gap: 6px; }
+  .room-label { display: none; }
 }
