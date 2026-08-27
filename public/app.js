@@ -368,7 +368,20 @@ function connectSocket() {
     showToast('⚠️ Disconnected from server. Reconnecting…');
   });
 
-  state.socket.on('user-status-changed', ({ users }) => {
+  state.socket.on('user-status-changed', ({ users, newHostName }) => {
+    const myToken = getUserToken();
+    const isMeHost = users.some(u => u.isHost && (u.id === state.socket?.id || u.userToken === myToken));
+
+    if (isMeHost !== state.isHost) {
+      state.isHost = isMeHost;
+      applyMode();
+      if (isMeHost) {
+        showToast('👑 You are now the room Host!', 4000);
+      }
+    } else if (newHostName) {
+      showToast(`👑 ${newHostName} is now the room Host`);
+    }
+
     renderUsers(users);
   });
 
@@ -848,17 +861,37 @@ function uploadFile(file) {
 function renderUsers(users) {
   usersList.innerHTML = '';
   userCount.textContent = users.length;
+  const myToken = getUserToken();
+
   users.forEach(u => {
     const li = document.createElement('li');
     li.className = 'user-item' + (u.offline ? ' user-offline' : '');
-    const isMe = u.id === state.socket?.id || u.userToken === getUserToken();
+    const isMe = u.id === state.socket?.id || u.userToken === myToken;
+
+    const canMakeHost = state.isHost && !isMe && !u.isHost && !u.offline;
+    const makeHostBtnHtml = canMakeHost ? `<button class="btn-make-host" title="Transfer Host role to ${esc(u.name)}">👑</button>` : '';
+
     li.innerHTML = `
       <div class="user-avatar">${esc(u.name.slice(0,2).toUpperCase())}</div>
       <span class="user-name">${esc(u.name)}</span>
       ${u.isHost  ? '<span class="user-tag tag-host">Host</span>' : ''}
       ${u.offline ? '<span class="user-tag tag-offline">Reconnecting…</span>' : ''}
       ${isMe      ? '<span class="user-tag tag-you">You</span>'   : ''}
+      ${makeHostBtnHtml}
     `;
+
+    if (canMakeHost) {
+      const btn = li.querySelector('.btn-make-host');
+      if (btn) {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          if (confirm(`Transfer Host role to "${u.name}"?`)) {
+            state.socket.emit('make-host', { targetUserToken: u.userToken });
+          }
+        });
+      }
+    }
+
     usersList.appendChild(li);
   });
 }

@@ -691,6 +691,36 @@ io.on('connection', socket => {
     console.log(`[Room ${room.id}] Host switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
   });
 
+  // Transfer host privileges to another user in the room (Host only)
+  socket.on('make-host', ({ targetUserToken }, cb) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return;
+
+    if (socket.id !== room.hostId && socket.data.userToken !== room.hostToken) {
+      return socket.emit('error-msg', { message: 'Only the current host can transfer host permissions' });
+    }
+
+    const newHost = room.users.get(targetUserToken);
+    if (!newHost || newHost.offline) {
+      return socket.emit('error-msg', { message: 'Target user is not available in room' });
+    }
+
+    // Reset host status for all users in room
+    room.users.forEach(u => u.isHost = false);
+    newHost.isHost = true;
+    room.hostId = newHost.socketId;
+    room.hostToken = newHost.userToken;
+
+    io.to(room.id).emit('user-status-changed', {
+      users: publicRoom(room).users,
+      newHostName: newHost.name,
+      newHostToken: newHost.userToken
+    });
+
+    console.log(`[Room ${room.id}] Host transferred to ${newHost.name} (token: ${newHost.userToken})`);
+    if (typeof cb === 'function') cb({ success: true });
+  });
+
   // Playlist track deletion (Host only)
   socket.on('remove-track', ({ index }) => {
     const room = rooms.get(socket.data.roomId);
