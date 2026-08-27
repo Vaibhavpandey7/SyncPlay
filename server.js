@@ -833,6 +833,11 @@ setInterval(() => {
   });
 }, 5000);
 
+// Catch-all route to serve index.html for SPA page reloads / custom URLs
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // Express Error Handler
 app.use((err, req, res, next) => {
   if (err.message === 'Request aborted' || err.code === 'ECONNRESET') {
