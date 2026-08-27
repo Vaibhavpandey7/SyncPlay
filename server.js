@@ -221,10 +221,10 @@ const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 // Download audio via yt-dlp with multi-client & cookie fallback pipeline
 async function downloadAudio(videoId, roomId) {
   const attempts = [
+    { client: 'android,mweb,web', useCookies: true  },
     { client: 'tv,android',       useCookies: false },
     { client: 'creator,android',  useCookies: false },
-    { client: 'android,web',      useCookies: false },
-    { client: 'android,mweb,web', useCookies: true  }
+    { client: 'android,web',      useCookies: false }
   ];
 
   let lastError = null;
