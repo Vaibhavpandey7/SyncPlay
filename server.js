@@ -222,7 +222,9 @@ function downloadAudio(videoId, roomId) {
     const outTemplate = path.join(CACHE, `${videoId}.%(ext)s`);
     const args = [
       '--no-playlist',
-      '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio',
+      '--js-runtimes', 'node',
+      '--extractor-args', 'youtube:player_client=mweb,android,web',
+      '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',              // --print implies --simulate by default; override it
@@ -233,6 +235,7 @@ function downloadAudio(videoId, roomId) {
     const proc = spawn('yt-dlp', args);
     let title = videoId;
     let titleCaptured = false;
+    let lastStderr = '';
 
     proc.stdout.on('data', chunk => {
       const lines = chunk.toString().split('\n').filter(Boolean);
@@ -262,13 +265,17 @@ function downloadAudio(videoId, roomId) {
     });
 
     proc.stderr.on('data', chunk => {
-      // yt-dlp writes most output to stderr; we only care about errors here
       const line = chunk.toString();
-      if (line.includes('ERROR')) console.error(`[yt-dlp] ${line.trim()}`);
+      if (line.includes('ERROR')) {
+        console.error(`[yt-dlp Error] ${line.trim()}`);
+        lastStderr = line.replace(/ERROR:\s*/i, '').trim();
+      }
     });
 
     proc.on('close', async code => {
-      if (code !== 0) return reject(new Error(`yt-dlp exited with code ${code}`));
+      if (code !== 0) {
+        return reject(new Error(lastStderr || `yt-dlp exited with code ${code}`));
+      }
 
       // Retry up to 5 times (500ms) to allow disk flush completion
       let found = null;
@@ -326,7 +333,7 @@ app.post('/download/:roomId', async (req, res) => {
   if (cachedFile) {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
-    execFile('yt-dlp', ['--no-download', '--get-title',
+    execFile('yt-dlp', ['--js-runtimes', 'node', '--no-download', '--get-title',
       `https://www.youtube.com/watch?v=${videoId}`],
       (err, stdout) => {
         const trackName = (stdout || '').trim() || videoId;
