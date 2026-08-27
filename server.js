@@ -634,7 +634,7 @@ io.on('connection', socket => {
 
 
   // Playlist track selection (Host only)
-  socket.on('select-track', ({ index }) => {
+  socket.on('select-track', ({ index, autoPlay }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || index < 0 || index >= room.playlist.length) return;
 
@@ -643,21 +643,28 @@ io.on('connection', socket => {
     }
 
     const track = room.playlist[index];
+    const shouldAutoPlay = autoPlay === true || room.isPlaying;
+    const now = Date.now();
+    const playAt = shouldAutoPlay ? now + SYNC_DELAY : null;
+
     room.currentTrackIndex = index;
     room.audioFile = track.audioFile;
     room.trackName = track.trackName;
-    room.isPlaying = false;
+    room.isPlaying = shouldAutoPlay;
     room.position = 0;
     room.positionHistory = [];
-    room.serverTimeAtUpdate = Date.now();
+    room.serverTimeAtUpdate = playAt || now;
+    if (playAt) room.playAt = playAt;
 
     io.to(room.id).emit('track-loaded', {
       trackName: track.trackName,
       audioUrl: getAudioUrl(room.id, room),
       playlist: room.playlist,
-      currentTrackIndex: room.currentTrackIndex
+      currentTrackIndex: room.currentTrackIndex,
+      autoPlay: shouldAutoPlay,
+      playAt
     });
-    console.log(`[Room ${room.id}] Host switched to track #${index}: ${track.trackName}`);
+    console.log(`[Room ${room.id}] Host switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
   });
 
   // Playlist track deletion (Host only)

@@ -410,13 +410,16 @@ function connectSocket() {
   });
 
   // Track ready — load audio for everyone
-  state.socket.on('track-loaded', ({ trackName, audioUrl, playlist, currentTrackIndex }) => {
+  state.socket.on('track-loaded', ({ trackName, audioUrl, playlist, currentTrackIndex, autoPlay, playAt }) => {
     opProgressWrap.classList.add('hidden');
-    // Reset playing state — the new track always starts paused
-    state.roomIsPlaying = false;
+    state.roomIsPlaying = !!autoPlay;
     state.offsetHistory = [];
-    setPlayingVisuals(false);
-    loadAudio(audioUrl, trackName, 0, false);
+    setPlayingVisuals(!!autoPlay);
+    loadAudio(audioUrl, trackName, 0, () => {
+      if (autoPlay && playAt) {
+        schedulePlay(0, playAt);
+      }
+    });
     if (playlist) {
       state.playlist = playlist;
       state.currentTrackIndex = currentTrackIndex;
@@ -706,10 +709,11 @@ offsetSlider.addEventListener('input', () => {
 
 audioEngine.onEnded = () => {
   setPlayingVisuals(false);
+  state.roomIsPlaying = false;
   if (state.isHost && state.playlist && state.currentTrackIndex + 1 < state.playlist.length) {
     const nextIdx = state.currentTrackIndex + 1;
-    showToast(`▶ Playing next in queue: "${state.playlist[nextIdx].trackName}"`);
-    state.socket.emit('select-track', { index: nextIdx });
+    showToast(`▶ Auto-playing next in queue: "${state.playlist[nextIdx].trackName}"`);
+    state.socket.emit('select-track', { index: nextIdx, autoPlay: true });
   }
 };
 
@@ -895,7 +899,7 @@ function renderPlaylist(playlist, currentIndex) {
       }
       if (idx === currentIndex) return;
       showToast(`Switching to "${track.trackName}"…`);
-      state.socket.emit('select-track', { index: idx });
+      state.socket.emit('select-track', { index: idx, autoPlay: true });
     });
 
     // Delete track click (Host only)

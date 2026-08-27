@@ -186,11 +186,9 @@ ul{list-style:none}
 
 .scrub-wrap{display:flex;align-items:center;gap:12px}
 .time-label{font-size:.8rem;color:var(--t3);min-width:36px}
-.scrub-track{flex:1;height:4px;background:rgba(255,255,255,.1);border-radius:4px;position:relative;cursor:pointer;transition:height var(--ease)}
-.scrub-track:hover{height:6px}
+.scrub-track{flex:1;height:5px;background:rgba(255,255,255,.1);border-radius:4px;position:relative;cursor:pointer;transition:height var(--ease)}
+.scrub-track:hover{height:7px}
 .scrub-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--green),var(--blue));border-radius:4px;pointer-events:none;transition:width .5s linear}
-.scrub-knob{position:absolute;top:50%;right:0;transform:translate(50%,-50%);width:14px;height:14px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(34,197,94,.7);opacity:0;transition:opacity var(--ease);pointer-events:none}
-.scrub-track:hover .scrub-knob{opacity:1}
 
 .ctrl-badge{text-align:center;font-size:.8rem;padding:6px 14px;border-radius:6px;min-height:30px;display:flex;align-items:center;justify-content:center}
 .ctrl-badge.host{color:var(--green);background:var(--green-dim);border:1px solid rgba(34,197,94,.3)}
@@ -312,7 +310,6 @@ ul{list-style:none}
 
   /* Touch-friendly scrub bar */
   .scrub-track { height: 8px; }
-  .scrub-knob { width: 18px; height: 18px; opacity: 1; }
 
   /* Toast notification on mobile */
   .toast { max-width: 92vw; white-space: normal; text-align: center; font-size: 0.85rem; padding: 10px 16px; bottom: 20px; }
