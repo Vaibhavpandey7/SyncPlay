@@ -221,9 +221,10 @@ const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 // Download audio via yt-dlp with multi-client & cookie fallback pipeline
 async function downloadAudio(videoId, roomId) {
   const attempts = [
-    { client: 'android,mweb,web', useCookies: true },
+    { client: 'tv,android',       useCookies: false },
+    { client: 'creator,android',  useCookies: false },
     { client: 'android,web',      useCookies: false },
-    { client: 'tv,mweb,android',   useCookies: false }
+    { client: 'android,mweb,web', useCookies: true  }
   ];
 
   let lastError = null;
@@ -232,8 +233,8 @@ async function downloadAudio(videoId, roomId) {
     const { client, useCookies } = attempts[i];
     const hasCookies = useCookies && fs.existsSync(COOKIES_FILE);
 
-    // Skip first attempt if useCookies is requested but cookies.txt doesn't exist
-    if (useCookies && !hasCookies && i === 0) continue;
+    // Skip attempt if useCookies is requested but cookies.txt does not exist
+    if (useCookies && !hasCookies) continue;
 
     try {
       console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${hasCookies})`);
