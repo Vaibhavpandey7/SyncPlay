@@ -218,23 +218,50 @@ function findCached(videoId) {
 
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
-// Download audio via yt-dlp, emitting progress to a room
-function downloadAudio(videoId, roomId, allowCookies = true) {
+// Download audio via yt-dlp with multi-client & cookie fallback pipeline
+async function downloadAudio(videoId, roomId) {
+  const attempts = [
+    { client: 'android,mweb,web', useCookies: true },
+    { client: 'android,web',      useCookies: false },
+    { client: 'tv,mweb,android',   useCookies: false }
+  ];
+
+  let lastError = null;
+
+  for (let i = 0; i < attempts.length; i++) {
+    const { client, useCookies } = attempts[i];
+    const hasCookies = useCookies && fs.existsSync(COOKIES_FILE);
+
+    // Skip first attempt if useCookies is requested but cookies.txt doesn't exist
+    if (useCookies && !hasCookies && i === 0) continue;
+
+    try {
+      console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${hasCookies})`);
+      return await executeYtdlp(videoId, roomId, client, hasCookies);
+    } catch (err) {
+      console.warn(`[yt-dlp] Attempt ${i + 1} failed for ${videoId}: ${err.message}`);
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('All download attempts failed');
+}
+
+function executeYtdlp(videoId, roomId, client, useCookies) {
   return new Promise((resolve, reject) => {
     const outTemplate = path.join(CACHE, `${videoId}.%(ext)s`);
     const args = [
       '--no-playlist',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=android,mweb,web',
+      '--extractor-args', `youtube:player_client=${client}`,
       '-f', 'bestaudio/best',
       '--output', outTemplate,
       '--newline',
-      '--no-simulate',              // --print implies --simulate by default; override it
-      '--print', 'before_dl:title' // print title BEFORE download (not after) so parser sees it first
+      '--no-simulate',
+      '--print', 'before_dl:title'
     ];
 
-    const hasCookies = allowCookies && fs.existsSync(COOKIES_FILE);
-    if (hasCookies) {
+    if (useCookies) {
       args.push('--cookies', COOKIES_FILE);
     }
 
@@ -248,24 +275,21 @@ function downloadAudio(videoId, roomId, allowCookies = true) {
     proc.stdout.on('data', chunk => {
       const lines = chunk.toString().split('\n').filter(Boolean);
       lines.forEach(line => {
-        // First non-progress line is the title (from --print title)
         if (!titleCaptured && !line.startsWith('[')) {
           title = line.trim();
           titleCaptured = true;
           return;
         }
 
-        // Download percentage: "[download]  45.3% of ..."
         const pctMatch = line.match(/\[download\]\s+([\d.]+)%/);
         if (pctMatch) {
           const percent = parseFloat(pctMatch[1]);
           io.to(roomId).emit('download-progress', {
-            percent: Math.round(percent * 0.85), // reserve 15% for ffmpeg
+            percent: Math.round(percent * 0.85),
             status: 'downloading'
           });
         }
 
-        // ffmpeg conversion stage
         if (line.includes('[ExtractAudio]') || line.includes('Destination:')) {
           io.to(roomId).emit('download-progress', { percent: 90, status: 'converting' });
         }
@@ -282,20 +306,9 @@ function downloadAudio(videoId, roomId, allowCookies = true) {
 
     proc.on('close', async code => {
       if (code !== 0) {
-        // If download failed with cookies (e.g. expired cookies), automatically retry without cookies!
-        if (hasCookies) {
-          console.warn(`[yt-dlp] Cookie attempt failed for ${videoId}. Retrying without cookies...`);
-          try {
-            const retryRes = await downloadAudio(videoId, roomId, false);
-            return resolve(retryRes);
-          } catch (retryErr) {
-            return reject(retryErr);
-          }
-        }
         return reject(new Error(lastStderr || `yt-dlp exited with code ${code}`));
       }
 
-      // Retry up to 5 times (500ms) to allow disk flush completion
       let found = null;
       for (let i = 0; i < 5; i++) {
         found = findCached(videoId);
