@@ -221,10 +221,9 @@ const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 // Download audio via yt-dlp with multi-client & cookie fallback pipeline
 async function downloadAudio(videoId, roomId) {
   const attempts = [
-    { client: 'tv,android',       useCookies: false },
-    { client: 'creator,android',  useCookies: false },
-    { client: 'android,web',      useCookies: false },
-    { client: 'android,mweb,web', useCookies: true  }
+    { client: 'android',     useCookies: false },
+    { client: 'android,web', useCookies: false },
+    { client: 'android',     useCookies: true  }
   ];
 
   let lastError = null;
@@ -257,7 +256,7 @@ function executeYtdlp(videoId, roomId, client, useCookies) {
       '--no-continue',
       '--js-runtimes', 'node',
       '--extractor-args', `youtube:player_client=${client}`,
-      '-f', 'bestaudio/best',
+      '-f', 'ba/b',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',
@@ -346,12 +345,22 @@ app.get('/room/:id', (req, res) => {
   res.json({ exists: true, userCount: room.users.size, maxSize: MAX_ROOM });
 });
 
-function getVideoTitle(videoId) {
+async function getVideoTitle(videoId) {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
+      signal: AbortSignal.timeout(4000)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.title) return data.title;
+    }
+  } catch (_) {}
+
   return new Promise(resolve => {
     const execArgs = [
       '--no-playlist',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=tv,android',
+      '--extractor-args', 'youtube:player_client=android',
       '--no-download',
       '--get-title',
       `https://www.youtube.com/watch?v=${videoId}`
