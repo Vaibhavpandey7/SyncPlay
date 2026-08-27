@@ -219,7 +219,7 @@ function findCached(videoId) {
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
 // Download audio via yt-dlp, emitting progress to a room
-function downloadAudio(videoId, roomId) {
+function downloadAudio(videoId, roomId, allowCookies = true) {
   return new Promise((resolve, reject) => {
     const outTemplate = path.join(CACHE, `${videoId}.%(ext)s`);
     const args = [
@@ -233,7 +233,8 @@ function downloadAudio(videoId, roomId) {
       '--print', 'before_dl:title' // print title BEFORE download (not after) so parser sees it first
     ];
 
-    if (fs.existsSync(COOKIES_FILE)) {
+    const hasCookies = allowCookies && fs.existsSync(COOKIES_FILE);
+    if (hasCookies) {
       args.push('--cookies', COOKIES_FILE);
     }
 
@@ -281,6 +282,16 @@ function downloadAudio(videoId, roomId) {
 
     proc.on('close', async code => {
       if (code !== 0) {
+        // If download failed with cookies (e.g. expired cookies), automatically retry without cookies!
+        if (hasCookies) {
+          console.warn(`[yt-dlp] Cookie attempt failed for ${videoId}. Retrying without cookies...`);
+          try {
+            const retryRes = await downloadAudio(videoId, roomId, false);
+            return resolve(retryRes);
+          } catch (retryErr) {
+            return reject(retryErr);
+          }
+        }
         return reject(new Error(lastStderr || `yt-dlp exited with code ${code}`));
       }
 
