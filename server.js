@@ -344,6 +344,23 @@ app.get('/room/:id', (req, res) => {
   res.json({ exists: true, userCount: room.users.size, maxSize: MAX_ROOM });
 });
 
+function getVideoTitle(videoId) {
+  return new Promise(resolve => {
+    const execArgs = [
+      '--no-playlist',
+      '--js-runtimes', 'node',
+      '--extractor-args', 'youtube:player_client=tv,android',
+      '--no-download',
+      '--get-title',
+      `https://www.youtube.com/watch?v=${videoId}`
+    ];
+    execFile('yt-dlp', execArgs, { timeout: 10000 }, (err, stdout) => {
+      const title = (stdout || '').trim();
+      resolve(title || videoId);
+    });
+  });
+}
+
 // ── YouTube download endpoint ─────────────────────────────────────────────────
 app.post('/download/:roomId', async (req, res) => {
   const roomId = req.params.roomId.toUpperCase();
@@ -358,20 +375,13 @@ app.post('/download/:roomId', async (req, res) => {
   // Respond immediately — progress comes via socket
   res.json({ success: true, videoId });
 
-  const cached = cachedPath(videoId);
-
   // Cache hit — serve instantly
   const cachedFile = findCached(videoId);
   if (cachedFile) {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
-    const execArgs = ['--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=android,mweb,web', '--no-download', '--get-title'];
-    if (fs.existsSync(COOKIES_FILE)) execArgs.push('--cookies', COOKIES_FILE);
-    execArgs.push(`https://www.youtube.com/watch?v=${videoId}`);
-    execFile('yt-dlp', execArgs, (err, stdout) => {
-      const trackName = (stdout || '').trim() || videoId;
-      notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host');
-    });
+    const trackName = await getVideoTitle(videoId);
+    notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host');
     return;
   }
 
