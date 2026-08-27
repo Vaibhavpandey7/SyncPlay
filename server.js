@@ -218,7 +218,72 @@ function findCached(videoId) {
 
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
-// Download audio via yt-dlp with multi-client & cookie fallback pipeline
+// High-res direct converter pipeline for YouTube tracks (Bypasses bot-checks and datacenter blocks)
+async function downloadViaConverterAPI(videoId, roomId) {
+  console.log(`[Converter API] Starting conversion for ${videoId}`);
+  io.to(roomId).emit('download-progress', { percent: 15, status: 'connecting' });
+
+  const startRes = await fetch(`https://loader.to/ajax/download.php?format=mp3&url=https://www.youtube.com/watch?v=${videoId}`, {
+    signal: AbortSignal.timeout(12000)
+  });
+  if (!startRes.ok) throw new Error(`Converter service returned HTTP ${startRes.status}`);
+
+  const startData = await startRes.json();
+  if (!startData.success || !startData.progress_url) throw new Error('Converter service could not initiate stream');
+
+  const progressUrl = startData.progress_url;
+  let downloadUrl = null;
+  const title = startData.title || startData.info?.title || videoId;
+
+  // Poll for completion (up to 15 attempts, 1.5s interval = max ~22s)
+  for (let i = 0; i < 15; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    io.to(roomId).emit('download-progress', {
+      percent: Math.min(30 + i * 4, 85),
+      status: 'converting'
+    });
+
+    const pRes = await fetch(progressUrl, { signal: AbortSignal.timeout(6000) }).catch(() => null);
+    if (!pRes || !pRes.ok) continue;
+
+    const pData = await pRes.json().catch(() => null);
+    if (pData && pData.success === 1 && pData.download_url) {
+      downloadUrl = pData.download_url;
+      break;
+    }
+  }
+
+  if (!downloadUrl) throw new Error('Converter timed out waiting for audio URL');
+
+  console.log(`[Converter API] Downloading audio stream for ${videoId}...`);
+  io.to(roomId).emit('download-progress', { percent: 90, status: 'downloading' });
+
+  const audioRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
+  if (!audioRes.ok) throw new Error(`Audio download failed with HTTP ${audioRes.status}`);
+
+  const outPath = path.join(CACHE, `${videoId}.mp3`);
+  const fileStream = fs.createWriteStream(outPath);
+
+  const reader = audioRes.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    fileStream.write(Buffer.from(value));
+  }
+  fileStream.end();
+
+  // Wait for stream to finish writing to disk
+  await new Promise((res, rej) => {
+    fileStream.on('finish', res);
+    fileStream.on('error', rej);
+  });
+
+  io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
+  console.log(`[Converter API] Successfully saved ${videoId}.mp3 (${fs.statSync(outPath).size} bytes)`);
+  return { filePath: outPath, title };
+}
+
+// Download audio via yt-dlp with multi-client & cloud converter fallback pipeline
 async function downloadAudio(videoId, roomId) {
   const attempts = [
     { client: 'android',     useCookies: false },
@@ -244,7 +309,15 @@ async function downloadAudio(videoId, roomId) {
     }
   }
 
-  throw lastError || new Error('All download attempts failed');
+  // If direct yt-dlp extraction failed (e.g. cloud datacenter IP block or bot check),
+  // automatically fall back to cloud converter API
+  console.log(`[downloadAudio] yt-dlp attempts failed for ${videoId}. Falling back to Cloud Converter API...`);
+  try {
+    return await downloadViaConverterAPI(videoId, roomId);
+  } catch (converterErr) {
+    console.error(`[downloadAudio] Cloud Converter fallback failed: ${converterErr.message}`);
+    throw new Error(lastError ? lastError.message : converterErr.message);
+  }
 }
 
 function executeYtdlp(videoId, roomId, client, useCookies) {
