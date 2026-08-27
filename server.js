@@ -216,6 +216,8 @@ function findCached(videoId) {
   return null;
 }
 
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+
 // Download audio via yt-dlp, emitting progress to a room
 function downloadAudio(videoId, roomId) {
   return new Promise((resolve, reject) => {
@@ -223,14 +225,19 @@ function downloadAudio(videoId, roomId) {
     const args = [
       '--no-playlist',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=mweb,android,web',
+      '--extractor-args', 'youtube:player_client=ios,mweb,tv,android',
       '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',              // --print implies --simulate by default; override it
-      '--print', 'before_dl:title', // print title BEFORE download (not after) so parser sees it first
-      `https://www.youtube.com/watch?v=${videoId}`
+      '--print', 'before_dl:title' // print title BEFORE download (not after) so parser sees it first
     ];
+
+    if (fs.existsSync(COOKIES_FILE)) {
+      args.push('--cookies', COOKIES_FILE);
+    }
+
+    args.push(`https://www.youtube.com/watch?v=${videoId}`);
 
     const proc = spawn('yt-dlp', args);
     let title = videoId;
@@ -333,13 +340,13 @@ app.post('/download/:roomId', async (req, res) => {
   if (cachedFile) {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
-    execFile('yt-dlp', ['--js-runtimes', 'node', '--no-download', '--get-title',
-      `https://www.youtube.com/watch?v=${videoId}`],
-      (err, stdout) => {
-        const trackName = (stdout || '').trim() || videoId;
-        notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host');
-      }
-    );
+    const execArgs = ['--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=ios,mweb,tv,android', '--no-download', '--get-title'];
+    if (fs.existsSync(COOKIES_FILE)) execArgs.push('--cookies', COOKIES_FILE);
+    execArgs.push(`https://www.youtube.com/watch?v=${videoId}`);
+    execFile('yt-dlp', execArgs, (err, stdout) => {
+      const trackName = (stdout || '').trim() || videoId;
+      notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host');
+    });
     return;
   }
 
