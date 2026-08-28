@@ -26,6 +26,7 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 const SYNC_DELAY = 500; // ms — 500ms buffering cushion for high-precision WebAudio alignment
 const MAX_ROOM = 4;
+const RECONNECT_GRACE_MS = 30000; // 30-second grace window for seamless user reconnection
 const UPLOADS = path.join(__dirname, 'uploads');
 const CACHE = path.join(__dirname, 'cache');
 
@@ -1013,7 +1014,7 @@ io.on('connection', socket => {
 
     if (user.disconnectTimer) clearTimeout(user.disconnectTimer);
 
-    // 30-second grace period before officially removing user / reassigning host
+    // Grace period before officially removing user / reassigning host
     user.disconnectTimer = setTimeout(() => {
       if (!user.offline) return; // User reconnected during grace period!
 
@@ -1046,7 +1047,7 @@ io.on('connection', socket => {
         users: publicRoom(room).users,
         newHostId
       });
-    }, 30000);
+    }, RECONNECT_GRACE_MS);
   });
 });
 
