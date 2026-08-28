@@ -970,18 +970,31 @@ function uploadFile(file) {
   xhr.timeout = 300000; // 5 minute timeout for mobile uploads
   xhr.open('POST', `/upload/${state.roomId}`);
   xhr.setRequestHeader('x-user-name', state.myName);
+  xhr.setRequestHeader('x-user-token', getUserToken());
+
+  // Keep WebSocket connection active with heartbeats during heavy file upload
+  const keepAliveTimer = setInterval(() => {
+    if (state.socket && state.socket.connected) {
+      state.socket.emit('ping-clock');
+    }
+  }, 10000);
+
+  const cleanupUpload = () => {
+    clearInterval(keepAliveTimer);
+    opProgressWrap.classList.add('hidden');
+    inputFile.value = '';
+  };
 
   xhr.upload.addEventListener('progress', e => {
     if (e.lengthComputable) {
-      const pct = Math.round(e.loaded / e.total * 100);
+      const pct = Math.round((e.loaded / e.total) * 100);
       opProgressBar.style.width = pct + '%';
       opProgressLabel.textContent = `Uploading… ${pct}%`;
     }
   });
 
   xhr.addEventListener('load', () => {
-    opProgressWrap.classList.add('hidden');
-    inputFile.value = '';
+    cleanupUpload();
     if (xhr.status !== 200) {
       try {
         const err = JSON.parse(xhr.responseText || '{}');
@@ -993,14 +1006,12 @@ function uploadFile(file) {
   });
 
   xhr.addEventListener('error', () => {
-    opProgressWrap.classList.add('hidden');
-    inputFile.value = '';
+    cleanupUpload();
     showErr(fileError, 'Network connection lost during upload. Please try again.');
   });
 
   xhr.addEventListener('timeout', () => {
-    opProgressWrap.classList.add('hidden');
-    inputFile.value = '';
+    cleanupUpload();
     showErr(fileError, 'Upload timed out. Check your internet connection or try a smaller file.');
   });
 

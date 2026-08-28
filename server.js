@@ -17,16 +17,16 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
-  pingTimeout: 60000,
+  pingTimeout: 120000, // 2 minutes to prevent disconnects during heavy mobile uploads
   pingInterval: 25000,
-  connectTimeout: 45000,
+  connectTimeout: 60000,
   transports: ['websocket', 'polling']
 });
 
 const PORT = process.env.PORT || 3000;
-const SYNC_DELAY = 500; // ms — 500ms buffering cushion for high-precision WebAudio alignment
+const SYNC_DELAY = 600; // ms — buffering cushion for high-precision WebAudio alignment
 const MAX_ROOM = 4;
-const RECONNECT_GRACE_MS = 30000; // 30-second grace window for seamless user reconnection
+const RECONNECT_GRACE_MS = 60000; // 60-second grace window for seamless user reconnection
 const UPLOADS = path.join(__dirname, 'uploads');
 const CACHE = path.join(__dirname, 'cache');
 
@@ -64,6 +64,7 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
   const token = hostToken || hostSocketId;
   return {
     id,
+    creatorToken: token,
     hostId: hostSocketId,
     hostToken: token,
     playlist: [],          // array of { id, trackName, audioFile, addedBy }
@@ -74,7 +75,7 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
     positionHistory: [],   // Server-side rolling 5-sample buffer for jitter-free room sync
     hostHardwareLatency: 0, // Hardware audio output latency of Host device
     downloading: false,
-    users: new Map([[token, { name: hostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, disconnectTimer: null }]])
+    users: new Map([[token, { name: hostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, isUploading: false, disconnectTimer: null }]])
   };
 }
 
@@ -562,25 +563,48 @@ app.post('/upload/:roomId', (req, res) => {
   req.setTimeout(300000); // 5 minutes for mobile uploads
   res.setTimeout(300000);
 
+  const roomId = req.params.roomId.toUpperCase();
+  const room = rooms.get(roomId);
+  const userToken = req.headers['x-user-token'];
+  const userName = req.headers['x-user-name'] || 'Host';
+
+  // Mark user as actively uploading so they are protected from disconnect / host-transfer
+  let uploadingUser = null;
+  if (room) {
+    if (userToken) uploadingUser = room.users.get(userToken);
+    if (!uploadingUser) {
+      for (const u of room.users.values()) {
+        if (u.name === userName || (u.isHost && !uploadingUser)) uploadingUser = u;
+      }
+    }
+    if (uploadingUser) {
+      uploadingUser.isUploading = true;
+      if (uploadingUser.disconnectTimer) {
+        clearTimeout(uploadingUser.disconnectTimer);
+        uploadingUser.disconnectTimer = null;
+      }
+    }
+  }
+
   upload.single('audio')(req, res, err => {
+    if (uploadingUser) uploadingUser.isUploading = false;
+
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({ error: 'File is too large. Max 50 MB.' });
       }
       if (err.message === 'Request aborted' || err.code === 'ECONNRESET') {
-        console.log(`[Upload] Client aborted upload for room ${req.params.roomId}`);
+        console.log(`[Upload] Client aborted upload for room ${roomId}`);
         return;
       }
       return res.status(400).json({ error: err.message || 'Upload failed' });
     }
 
-    const roomId = req.params.roomId.toUpperCase();
-    const room = rooms.get(roomId);
     if (!room) return res.status(404).json({ error: 'Room not found' });
     if (!req.file) return res.status(400).json({ error: 'No valid audio file received' });
 
     const trackName = req.file.originalname.replace(/\.[^/.]+$/, '');
-    notifyTrackAdded(roomId, room, trackName, req.file.path, req.headers['x-user-name'] || 'Host');
+    notifyTrackAdded(roomId, room, trackName, req.file.path, userName);
 
     console.log(`[Room ${roomId}] File uploaded: ${trackName}`);
     res.json({ success: true, trackName });
@@ -728,8 +752,17 @@ io.on('connection', socket => {
       user.socketId = socket.id;
       user.userToken = token;
       user.offline = false;
+      user.isUploading = false;
       if (userName) user.name = userName;
-      if (user.isHost) {
+
+      // If user was creator or host, or only online user, restore host status!
+      if (token === room.creatorToken || token === room.hostToken || user.isHost || [...room.users.values()].filter(u => !u.offline).length <= 1) {
+        if (token === room.creatorToken) {
+          for (const u of room.users.values()) {
+            if (u !== user) u.isHost = false;
+          }
+        }
+        user.isHost = true;
         room.hostId = socket.id;
         room.hostToken = token;
       }
@@ -858,19 +891,32 @@ io.on('connection', socket => {
     io.to(room.id).emit('seek', { position: pos, playAt, isPlaying: room.isPlaying });
   });
 
-  // Playlist track selection (Host only)
+  // Playlist track selection (Host or Creator)
   socket.on('select-track', ({ index, autoPlay }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || index < 0 || index >= room.playlist.length) return;
 
-    if (socket.id !== room.hostId && socket.data.userToken !== room.hostToken) {
+    const token = socket.data.userToken;
+    const isHostOrCreator = (socket.id === room.hostId || token === room.hostToken || token === room.creatorToken);
+    const onlineUsers = [...room.users.values()].filter(u => !u.offline);
+    const isSolo = onlineUsers.length <= 1;
+
+    if (!isHostOrCreator && !isSolo) {
       return socket.emit('error-msg', { message: 'Only the host can switch songs' });
+    }
+
+    // If creator is switching, ensure creator has host role
+    if (token === room.creatorToken && !room.users.get(token)?.isHost) {
+      for (const u of room.users.values()) u.isHost = (u.userToken === token);
+      room.hostId = socket.id;
+      room.hostToken = token;
+      io.to(room.id).emit('user-status-changed', { users: publicRoom(room).users });
     }
 
     const now = Date.now();
     const track = room.playlist[index];
     const shouldAutoPlay = autoPlay === true || room.isPlaying;
-    const TRACK_LOAD_SYNC_DELAY = 1200; // 1.2s cushion allows mobile devices to fetch & decode audio
+    const TRACK_LOAD_SYNC_DELAY = 1800; // 1.8s cushion allows all mobile & desktop devices to fetch & decode in sync
     const playAt = shouldAutoPlay ? now + TRACK_LOAD_SYNC_DELAY : null;
 
     room.currentTrackIndex = index;
@@ -890,7 +936,7 @@ io.on('connection', socket => {
       autoPlay: shouldAutoPlay,
       playAt
     });
-    console.log(`[Room ${room.id}] Host switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
+    console.log(`[Room ${room.id}] Switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
   });
 
   // Transfer host privileges to another user in the room (Host only)
@@ -1065,9 +1111,9 @@ io.on('connection', socket => {
     }
     if (!user) return;
 
-    // CRITICAL: If the user has already reconnected with a newer active socket, do NOT mark offline!
-    if (user.socketId !== socket.id && !user.offline) {
-      console.log(`[Room ${roomId}] Ignoring stale socket disconnect (${socket.id}) for active user ${user.name} (${user.socketId})`);
+    // CRITICAL: If user is actively uploading a file, do not mark offline or start removal
+    if (user.isUploading) {
+      console.log(`[Room ${roomId}] User ${user.name} socket dropped during active upload — preserving active session.`);
       return;
     }
 
@@ -1087,9 +1133,9 @@ io.on('connection', socket => {
       if (!curRoom) return;
       const curUser = curRoom.users.get(userKey) || [...curRoom.users.values()].find(u => u.userToken === user.userToken);
 
-      // If user is no longer offline, they reconnected! Do nothing!
-      if (!curUser || !curUser.offline) {
-        console.log(`[Room ${roomId}] User ${user.name} is active/reconnected — canceling removal.`);
+      // If user is no longer offline or is actively uploading, do nothing!
+      if (!curUser || !curUser.offline || curUser.isUploading) {
+        console.log(`[Room ${roomId}] User ${user.name} is active/uploading/reconnected — canceling removal.`);
         return;
       }
 
@@ -1109,9 +1155,7 @@ io.on('connection', socket => {
         if (nextOnlineUser) {
           nextOnlineUser.isHost = true;
           curRoom.hostId = nextOnlineUser.socketId;
-          for (const [t, u] of curRoom.users.entries()) {
-            if (u === nextOnlineUser) { curRoom.hostToken = t; break; }
-          }
+          curRoom.hostToken = nextOnlineUser.userToken;
           newHostId = nextOnlineUser.socketId;
         }
       }
