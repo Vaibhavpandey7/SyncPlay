@@ -98,8 +98,23 @@ class WebAudioSyncEngine {
     this.buffer = null;
     this.duration = 0;
 
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('Failed to fetch audio stream');
+    let res = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        res = await fetch(url);
+        if (res.ok) break;
+      } catch (e) {
+        lastErr = e;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    if (!res || !res.ok) {
+      const statusText = res ? `HTTP ${res.status}` : (lastErr?.message || 'Network error');
+      throw new Error(statusText);
+    }
+
     const arrayBuf = await res.arrayBuffer();
 
     // Universal compatibility with older iOS WebKit callback and modern Promise

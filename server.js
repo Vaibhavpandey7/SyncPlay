@@ -152,7 +152,7 @@ function cleanupRoom(roomId) {
   cleanOrphanFiles();
 }
 
-// Clean up all leftover files in uploads and cache directories that do not belong to active rooms
+// Clean up old temporary files in uploads and cache directories (only files older than 24 hours)
 function cleanOrphanFiles() {
   const activeFiles = new Set();
   rooms.forEach(room => {
@@ -163,19 +163,28 @@ function cleanOrphanFiles() {
     });
   });
 
-  [UPLOADS, CACHE].forEach(dir => {
+  const now = Date.now();
+  const MAX_CACHE_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const MAX_UPLOAD_AGE_MS = 6 * 60 * 60 * 1000;  // 6 hours
+
+  [CACHE, UPLOADS].forEach(dir => {
     if (!fs.existsSync(dir)) return;
     try {
       const files = fs.readdirSync(dir);
       files.forEach(file => {
         const filePath = path.join(dir, file);
         const resolvedPath = path.resolve(filePath);
-        if (!activeFiles.has(resolvedPath)) {
-          try {
+        if (activeFiles.has(resolvedPath)) return; // Keep files in active use
+
+        try {
+          const stats = fs.statSync(filePath);
+          const age = now - stats.mtimeMs;
+          const maxAge = dir === CACHE ? MAX_CACHE_AGE_MS : MAX_UPLOAD_AGE_MS;
+          if (age > maxAge) {
             fs.unlinkSync(filePath);
-            console.log(`[Cleanup] Deleted unused file: ${file}`);
-          } catch (_) { }
-        }
+            console.log(`[Cleanup] Deleted expired file (${Math.round(age / 3600000)}h old): ${file}`);
+          }
+        } catch (_) { }
       });
     } catch (err) {
       console.error('[Cleanup Error]', err.message);
@@ -183,9 +192,8 @@ function cleanOrphanFiles() {
   });
 }
 
-// Run orphan cleanup on server boot and every 15 minutes
-cleanOrphanFiles();
-setInterval(cleanOrphanFiles, 15 * 60 * 1000);
+// Run orphan cleanup every 1 hour (do not wipe active cache on boot)
+setInterval(cleanOrphanFiles, 60 * 60 * 1000);
 
 function getAudioUrl(roomId, room) {
   return `/audio/${roomId}?idx=${room.currentTrackIndex}&v=${Date.now()}`;
@@ -576,13 +584,26 @@ app.get('/audio/:roomId', (req, res) => {
   let filePath = room.audioFile;
   if (req.query.idx !== undefined) {
     const idx = parseInt(req.query.idx, 10);
-    if (room.playlist[idx] && fs.existsSync(room.playlist[idx].audioFile)) {
+    if (room.playlist[idx] && room.playlist[idx].audioFile && fs.existsSync(room.playlist[idx].audioFile)) {
       filePath = room.playlist[idx].audioFile;
     }
   }
 
-  if (!filePath || !fs.existsSync(filePath))
+  // If path is missing or doesn't exist on disk, attempt fallback resolution from CACHE
+  if (!filePath || !fs.existsSync(filePath)) {
+    if (room.trackName) {
+      const vid = extractVideoId(room.trackName) || extractVideoId(room.audioFile || '');
+      if (vid) {
+        const cached = findCached(vid);
+        if (cached) filePath = cached;
+      }
+    }
+  }
+
+  if (!filePath || !fs.existsSync(filePath)) {
+    console.warn(`[Audio 404] File not found for room ${roomId}: ${filePath}`);
     return res.status(404).json({ error: 'No audio available' });
+  }
 
   const fileSize = fs.statSync(filePath).size;
   const range = req.headers.range;
