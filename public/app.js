@@ -944,20 +944,30 @@ dropZone.addEventListener('drop', e => {
 inputFile.addEventListener('change', () => { if (inputFile.files[0]) uploadFile(inputFile.files[0]); });
 
 function uploadFile(file) {
-  if (!file.type.startsWith('audio/') && file.type !== 'video/mp4') {
-    showErr(fileError, 'Please select an audio file.'); return;
+  const isAudioExt = /\.(mp3|m4a|aac|wav|ogg|opus|flac|webm|mp4|wma)$/i.test(file.name);
+  const isAudioMime = !file.type || file.type.startsWith('audio/') || file.type === 'video/mp4';
+
+  if (!isAudioExt && !isAudioMime) {
+    showErr(fileError, 'Please select an audio file (MP3, M4A, AAC, WAV, etc).');
+    inputFile.value = '';
+    return;
   }
-  if (file.size > 50 * 1024 * 1024) { showErr(fileError, 'Max 50 MB.'); return; }
+  if (file.size > 50 * 1024 * 1024) {
+    showErr(fileError, 'File is too large. Max size is 50 MB.');
+    inputFile.value = '';
+    return;
+  }
 
   fileError.classList.add('hidden');
   opProgressWrap.classList.remove('hidden');
   opProgressBar.style.width = '0%';
-  opProgressLabel.textContent = 'Uploading…';
+  opProgressLabel.textContent = 'Uploading… 0%';
 
   const fd = new FormData();
   fd.append('audio', file);
 
   const xhr = new XMLHttpRequest();
+  xhr.timeout = 300000; // 5 minute timeout for mobile uploads
   xhr.open('POST', `/upload/${state.roomId}`);
   xhr.setRequestHeader('x-user-name', state.myName);
 
@@ -968,18 +978,32 @@ function uploadFile(file) {
       opProgressLabel.textContent = `Uploading… ${pct}%`;
     }
   });
+
   xhr.addEventListener('load', () => {
     opProgressWrap.classList.add('hidden');
+    inputFile.value = '';
     if (xhr.status !== 200) {
-      const err = JSON.parse(xhr.responseText || '{}');
-      showErr(fileError, err.error || 'Upload failed.');
+      try {
+        const err = JSON.parse(xhr.responseText || '{}');
+        showErr(fileError, err.error || 'Upload failed.');
+      } catch (_) {
+        showErr(fileError, `Upload failed (HTTP ${xhr.status}).`);
+      }
     }
-    // track-loaded socket event handles the rest
   });
+
   xhr.addEventListener('error', () => {
     opProgressWrap.classList.add('hidden');
-    showErr(fileError, 'Network error during upload.');
+    inputFile.value = '';
+    showErr(fileError, 'Network connection lost during upload. Please try again.');
   });
+
+  xhr.addEventListener('timeout', () => {
+    opProgressWrap.classList.add('hidden');
+    inputFile.value = '';
+    showErr(fileError, 'Upload timed out. Check your internet connection or try a smaller file.');
+  });
+
   xhr.send(fd);
 }
 

@@ -33,6 +33,8 @@ const CACHE = path.join(__dirname, 'cache');
 [UPLOADS, CACHE].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d); });
 
 // ─── Multer (file upload) ─────────────────────────────────────────────────────
+const AUDIO_EXTS = /\.(mp3|m4a|aac|wav|ogg|opus|flac|webm|mp4|wma)$/i;
+
 const storage = multer.diskStorage({
   destination: UPLOADS,
   filename: (req, file, cb) => {
@@ -44,8 +46,15 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 },
-  fileFilter: (_, file, cb) =>
-    cb(null, /audio\/|video\/mp4/.test(file.mimetype))
+  fileFilter: (_, file, cb) => {
+    const isAudioMime = !file.mimetype || /audio\/|video\/mp4|application\/octet-stream/.test(file.mimetype);
+    const isAudioExt = AUDIO_EXTS.test(file.originalname);
+    if (isAudioMime || isAudioExt) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only audio files (MP3, M4A, AAC, WAV, OGG, OPUS, FLAC) are supported.'));
+    }
+  }
 });
 
 // ─── Room state ───────────────────────────────────────────────────────────────
@@ -550,6 +559,9 @@ app.post('/download/:roomId', async (req, res) => {
 
 // ── File upload endpoint ──────────────────────────────────────────────────────
 app.post('/upload/:roomId', (req, res) => {
+  req.setTimeout(300000); // 5 minutes for mobile uploads
+  res.setTimeout(300000);
+
   upload.single('audio')(req, res, err => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -565,7 +577,7 @@ app.post('/upload/:roomId', (req, res) => {
     const roomId = req.params.roomId.toUpperCase();
     const room = rooms.get(roomId);
     if (!room) return res.status(404).json({ error: 'Room not found' });
-    if (!req.file) return res.status(400).json({ error: 'No valid audio file' });
+    if (!req.file) return res.status(400).json({ error: 'No valid audio file received' });
 
     const trackName = req.file.originalname.replace(/\.[^/.]+$/, '');
     notifyTrackAdded(roomId, room, trackName, req.file.path, req.headers['x-user-name'] || 'Host');
@@ -1148,6 +1160,10 @@ app.use((err, req, res, next) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
+server.timeout = 300000; // 5 minutes
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
 server.listen(PORT, '0.0.0.0', () => {
   const os = require('os');
   const interfaces = os.networkInterfaces();
