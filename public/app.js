@@ -139,6 +139,7 @@ class WebAudioSyncEngine {
   _checkpoint() {
     if (!this.source || !this.ctx) return;
     const elapsed = this.ctx.currentTime - this.startTime;
+    if (elapsed <= 0) return; // Playback has not started yet (scheduled in future)
     const currentRate = this.source.playbackRate.value;
     this.startPosition = Math.min(this.duration, this.startPosition + elapsed * currentRate);
     this.startTime = this.ctx.currentTime;

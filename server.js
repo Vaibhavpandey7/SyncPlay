@@ -777,8 +777,8 @@ io.on('connection', socket => {
 
     const track = room.playlist[index];
     const shouldAutoPlay = autoPlay === true || room.isPlaying;
-    const now = Date.now();
-    const playAt = shouldAutoPlay ? now + SYNC_DELAY : null;
+    const TRACK_LOAD_SYNC_DELAY = 1200; // 1.2s cushion allows mobile devices to fetch & decode audio
+    const playAt = shouldAutoPlay ? now + TRACK_LOAD_SYNC_DELAY : null;
 
     room.currentTrackIndex = index;
     room.audioFile = track.audioFile;
