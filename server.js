@@ -218,13 +218,32 @@ function findCached(videoId) {
 
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
+// Sync cookies from environment variable if provided (useful for Render/Railway/Docker deployments)
+if (process.env.YOUTUBE_COOKIES && process.env.YOUTUBE_COOKIES.trim()) {
+  try {
+    const rawVal = process.env.YOUTUBE_COOKIES.trim();
+    const cookieData = rawVal.startsWith('ey') || (rawVal.length > 50 && !rawVal.includes('\n') && rawVal.includes('='))
+      ? Buffer.from(rawVal, 'base64').toString('utf-8')
+      : rawVal;
+    fs.writeFileSync(COOKIES_FILE, cookieData, 'utf-8');
+    console.log('[Cookies] Successfully synced YouTube cookies from YOUTUBE_COOKIES environment variable.');
+  } catch (e) {
+    console.warn('[Cookies] Failed to write YOUTUBE_COOKIES to cookies.txt:', e.message);
+  }
+}
+
 // High-res direct converter pipeline for YouTube tracks (Bypasses bot-checks and datacenter blocks)
 async function downloadViaConverterAPI(videoId, roomId) {
-  console.log(`[Converter API] Starting conversion for ${videoId}`);
+  console.log(`[Converter API] Starting fallback conversion for ${videoId}`);
   io.to(roomId).emit('download-progress', { percent: 15, status: 'connecting' });
 
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+  };
+
   const startRes = await fetch(`https://loader.to/ajax/download.php?format=mp3&url=https://www.youtube.com/watch?v=${videoId}`, {
-    signal: AbortSignal.timeout(12000)
+    headers,
+    signal: AbortSignal.timeout(15000)
   });
   if (!startRes.ok) throw new Error(`Converter service returned HTTP ${startRes.status}`);
 
@@ -235,30 +254,30 @@ async function downloadViaConverterAPI(videoId, roomId) {
   let downloadUrl = null;
   const title = startData.title || startData.info?.title || videoId;
 
-  // Poll for completion (up to 15 attempts, 1.5s interval = max ~22s)
-  for (let i = 0; i < 15; i++) {
+  // Poll for completion (up to 30 attempts, 1.5s interval = max ~45s)
+  for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 1500));
     io.to(roomId).emit('download-progress', {
-      percent: Math.min(30 + i * 4, 85),
+      percent: Math.min(25 + i * 2, 85),
       status: 'converting'
     });
 
-    const pRes = await fetch(progressUrl, { signal: AbortSignal.timeout(6000) }).catch(() => null);
+    const pRes = await fetch(progressUrl, { headers, signal: AbortSignal.timeout(8000) }).catch(() => null);
     if (!pRes || !pRes.ok) continue;
 
     const pData = await pRes.json().catch(() => null);
-    if (pData && pData.success === 1 && pData.download_url) {
+    if (pData && (pData.success === 1 || pData.success === true || pData.download_url) && pData.download_url) {
       downloadUrl = pData.download_url;
       break;
     }
   }
 
-  if (!downloadUrl) throw new Error('Converter timed out waiting for audio URL');
+  if (!downloadUrl) throw new Error('Converter timed out waiting for audio conversion');
 
   console.log(`[Converter API] Downloading audio stream for ${videoId}...`);
   io.to(roomId).emit('download-progress', { percent: 90, status: 'downloading' });
 
-  const audioRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
+  const audioRes = await fetch(downloadUrl, { headers, signal: AbortSignal.timeout(60000) });
   if (!audioRes.ok) throw new Error(`Audio download failed with HTTP ${audioRes.status}`);
 
   const outPath = path.join(CACHE, `${videoId}.mp3`);
@@ -285,24 +304,24 @@ async function downloadViaConverterAPI(videoId, roomId) {
 
 // Download audio via yt-dlp with multi-client & cloud converter fallback pipeline
 async function downloadAudio(videoId, roomId) {
+  const browserCookies = process.env.YTDLP_COOKIES_BROWSER;
+  const hasCookiesFile = fs.existsSync(COOKIES_FILE);
+
   const attempts = [
-    { client: 'android',     useCookies: false },
-    { client: 'android,web', useCookies: false },
-    { client: 'android',     useCookies: true  }
+    { client: 'visionos,ios,web,android', useCookies: false, fromBrowser: false },
+    ...(browserCookies ? [{ client: 'default', useCookies: false, fromBrowser: browserCookies }] : []),
+    ...(hasCookiesFile ? [{ client: 'default', useCookies: true, fromBrowser: false }] : []),
+    { client: 'default', useCookies: false, fromBrowser: false },
+    { client: 'mweb,web', useCookies: false, fromBrowser: false }
   ];
 
   let lastError = null;
 
   for (let i = 0; i < attempts.length; i++) {
-    const { client, useCookies } = attempts[i];
-    const hasCookies = useCookies && fs.existsSync(COOKIES_FILE);
-
-    // Skip attempt if useCookies is requested but cookies.txt does not exist
-    if (useCookies && !hasCookies) continue;
-
+    const { client, useCookies, fromBrowser } = attempts[i];
     try {
-      console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${hasCookies})`);
-      return await executeYtdlp(videoId, roomId, client, hasCookies);
+      console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${useCookies}, browser: ${fromBrowser || false})`);
+      return await executeYtdlp(videoId, roomId, client, useCookies, fromBrowser);
     } catch (err) {
       console.warn(`[yt-dlp] Attempt ${i + 1} failed for ${videoId}: ${err.message}`);
       lastError = err;
@@ -316,31 +335,38 @@ async function downloadAudio(videoId, roomId) {
     return await downloadViaConverterAPI(videoId, roomId);
   } catch (converterErr) {
     console.error(`[downloadAudio] Cloud Converter fallback failed: ${converterErr.message}`);
-    throw new Error(lastError ? lastError.message : converterErr.message);
+    throw new Error(converterErr.message || (lastError ? lastError.message : 'Failed to download YouTube audio.'));
   }
 }
 
-function executeYtdlp(videoId, roomId, client, useCookies) {
+function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
   return new Promise((resolve, reject) => {
     const outTemplate = path.join(CACHE, `${videoId}.%(ext)s`);
     const args = [
       '--no-playlist',
       '--force-overwrites',
       '--no-continue',
-      '--js-runtimes', 'node',
-      '--extractor-args', `youtube:player_client=${client}`,
+      '--js-runtimes', 'node'
+    ];
+
+    if (client && client !== 'default') {
+      args.push('--extractor-args', `youtube:player_client=${client}`);
+    }
+
+    if (fromBrowser) {
+      args.push('--cookies-from-browser', fromBrowser);
+    } else if (useCookies && fs.existsSync(COOKIES_FILE)) {
+      args.push('--cookies', COOKIES_FILE);
+    }
+
+    args.push(
       '-f', 'ba/b',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',
-      '--print', 'before_dl:title'
-    ];
-
-    if (useCookies) {
-      args.push('--cookies', COOKIES_FILE);
-    }
-
-    args.push(`https://www.youtube.com/watch?v=${videoId}`);
+      '--print', 'before_dl:title',
+      `https://www.youtube.com/watch?v=${videoId}`
+    );
 
     const proc = spawn('yt-dlp', args);
     let title = videoId;
@@ -433,7 +459,6 @@ async function getVideoTitle(videoId) {
     const execArgs = [
       '--no-playlist',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=android',
       '--no-download',
       '--get-title',
       `https://www.youtube.com/watch?v=${videoId}`
