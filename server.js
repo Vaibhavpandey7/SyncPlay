@@ -660,6 +660,32 @@ io.on('connection', socket => {
     const token = userToken || socket.id;
     let user = room.users.get(token);
 
+    // 1. If not found by map key, look up by stored userToken
+    if (!user) {
+      for (const [k, u] of room.users.entries()) {
+        if (u.userToken === token || k === token) {
+          user = u;
+          if (k !== token) {
+            room.users.delete(k);
+            room.users.set(token, user);
+          }
+          break;
+        }
+      }
+    }
+
+    // 2. If still not found, check if there is an offline user with the same name to reclaim
+    if (!user && userName) {
+      for (const [k, u] of room.users.entries()) {
+        if (u.offline && u.name.trim().toLowerCase() === userName.trim().toLowerCase()) {
+          user = u;
+          room.users.delete(k);
+          room.users.set(token, user);
+          break;
+        }
+      }
+    }
+
     if (user) {
       // Rejoining existing session!
       if (user.disconnectTimer) {
@@ -680,9 +706,10 @@ io.on('connection', socket => {
       socket.data.userToken = token;
 
       io.to(id).emit('user-status-changed', {
-        users: publicRoom(room).users
+        users: publicRoom(room).users,
+        reconnectedName: user.name
       });
-      console.log(`[Room ${id}] ${user.name} reconnected (token: ${token})`);
+      console.log(`[Room ${id}] ${user.name} reconnected (token: ${token}, socket: ${socket.id}, isHost: ${user.isHost})`);
     } else {
       // New user joining
       if (room.users.size >= MAX_ROOM) return typeof cb === 'function' && cb({ error: 'Room is full (max 4)' });
@@ -930,7 +957,7 @@ io.on('connection', socket => {
     let user = room.users.get(userKey);
     if (!user) {
       for (const [k, u] of room.users.entries()) {
-        if (u.socketId === socket.id) {
+        if (u.socketId === socket.id || u.userToken === userToken) {
           userKey = k;
           user = u;
           break;
@@ -983,7 +1010,7 @@ io.on('connection', socket => {
     });
   });
 
-  // Disconnect with 30-second grace window for reconnection
+  // Disconnect with grace window for reconnection
   socket.on('disconnect', (reason) => {
     const roomId = socket.data.roomId;
     const userToken = socket.data.userToken;
@@ -996,7 +1023,7 @@ io.on('connection', socket => {
     let user = room.users.get(userKey);
     if (!user) {
       for (const [k, u] of room.users.entries()) {
-        if (u.socketId === socket.id) {
+        if (u.socketId === socket.id || u.userToken === userToken) {
           userKey = k;
           user = u;
           break;
@@ -1005,8 +1032,14 @@ io.on('connection', socket => {
     }
     if (!user) return;
 
+    // CRITICAL: If the user has already reconnected with a newer active socket, do NOT mark offline!
+    if (user.socketId !== socket.id && !user.offline) {
+      console.log(`[Room ${roomId}] Ignoring stale socket disconnect (${socket.id}) for active user ${user.name} (${user.socketId})`);
+      return;
+    }
+
     user.offline = true;
-    console.log(`[Room ${roomId}] ${user.name} went offline (30s grace window started)`);
+    console.log(`[Room ${roomId}] ${user.name} went offline (${RECONNECT_GRACE_MS / 1000}s grace window started)`);
 
     io.to(roomId).emit('user-status-changed', {
       users: publicRoom(room).users
@@ -1016,35 +1049,44 @@ io.on('connection', socket => {
 
     // Grace period before officially removing user / reassigning host
     user.disconnectTimer = setTimeout(() => {
-      if (!user.offline) return; // User reconnected during grace period!
+      // Re-verify room and user status before taking destructive action
+      const curRoom = rooms.get(roomId);
+      if (!curRoom) return;
+      const curUser = curRoom.users.get(userKey) || [...curRoom.users.values()].find(u => u.userToken === user.userToken);
 
-      const wasHost = user.isHost;
-      room.users.delete(userKey);
-      console.log(`[Room ${roomId}] ${user.name} grace period expired -> removed`);
+      // If user is no longer offline, they reconnected! Do nothing!
+      if (!curUser || !curUser.offline) {
+        console.log(`[Room ${roomId}] User ${user.name} is active/reconnected — canceling removal.`);
+        return;
+      }
 
-      const remainingUsers = [...room.users.values()];
+      const wasHost = curUser.isHost;
+      curRoom.users.delete(userKey);
+      console.log(`[Room ${roomId}] ${curUser.name} grace period expired -> removed`);
+
+      const remainingUsers = [...curRoom.users.values()];
       if (remainingUsers.length === 0) {
         cleanupRoom(roomId);
         return;
       }
 
-      let newHostId = room.hostId;
+      let newHostId = curRoom.hostId;
       if (wasHost) {
         const nextOnlineUser = remainingUsers.find(u => !u.offline) || remainingUsers[0];
         if (nextOnlineUser) {
           nextOnlineUser.isHost = true;
-          room.hostId = nextOnlineUser.socketId;
-          for (const [t, u] of room.users.entries()) {
-            if (u === nextOnlineUser) { room.hostToken = t; break; }
+          curRoom.hostId = nextOnlineUser.socketId;
+          for (const [t, u] of curRoom.users.entries()) {
+            if (u === nextOnlineUser) { curRoom.hostToken = t; break; }
           }
           newHostId = nextOnlineUser.socketId;
         }
       }
 
       io.to(roomId).emit('user-left', {
-        userId: user.socketId || socket.id,
-        name: user.name,
-        users: publicRoom(room).users,
+        userId: curUser.socketId || socket.id,
+        name: curUser.name,
+        users: publicRoom(curRoom).users,
         newHostId
       });
     }, RECONNECT_GRACE_MS);

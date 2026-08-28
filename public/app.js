@@ -375,8 +375,12 @@ function connectSocket() {
 
   state.socket.on('connect', () => {
     console.log('[Socket] Connected:', state.socket.id);
-    // Auto-reconnect to room if already joined
-    if (state.roomId) {
+    // Auto-reconnect to room if already joined or saved in session
+    const savedRoomId = state.roomId || sessionStorage.getItem('syncplay_room_id');
+    const savedName = state.myName || sessionStorage.getItem('syncplay_user_name') || 'Listener';
+    if (savedRoomId) {
+      state.roomId = savedRoomId;
+      state.myName = savedName;
       console.log('[Socket] Rejoining room:', state.roomId);
       state.socket.emit('join-room', {
         roomId: state.roomId,
@@ -385,13 +389,14 @@ function connectSocket() {
       }, res => {
         if (res && res.success) {
           state.isHost = res.isHost;
-          applyMode();
-          renderUsers(res.room.users);
+          enterRoom(res.room, res.isHost);
           showToast('🟢 Reconnected to room');
         } else if (res && res.error) {
           showToast('❌ ' + res.error);
           state.roomId = null;
           state.isHost = false;
+          sessionStorage.removeItem('syncplay_room_id');
+          sessionStorage.removeItem('syncplay_user_name');
           showPage('landing');
         }
       });
@@ -404,7 +409,7 @@ function connectSocket() {
     showToast('⚠️ Disconnected from server. Reconnecting…', 3000);
   });
 
-  state.socket.on('user-status-changed', ({ users, newHostName }) => {
+  state.socket.on('user-status-changed', ({ users, newHostName, reconnectedName }) => {
     const myToken = getUserToken();
     const isMeHost = users.some(u => u.isHost && (u.id === state.socket?.id || u.userToken === myToken));
 
@@ -416,6 +421,8 @@ function connectSocket() {
       }
     } else if (newHostName) {
       showToast(`👑 ${newHostName} is now the room Host`);
+    } else if (reconnectedName) {
+      showToast(`🟢 ${reconnectedName} reconnected`);
     }
 
     renderUsers(users);
@@ -1026,6 +1033,11 @@ function enterRoom(roomData, isHost) {
   setPlayingVisuals(state.roomIsPlaying);
   displayRoomId.textContent = roomData.id;
 
+  try {
+    sessionStorage.setItem('syncplay_room_id', roomData.id);
+    if (state.myName) sessionStorage.setItem('syncplay_user_name', state.myName);
+  } catch (_) {}
+
   showPage('room');
   applyMode();
   renderUsers(roomData.users);
@@ -1079,6 +1091,11 @@ btnLeave.addEventListener('click', () => {
   if (state.socket) {
     state.socket.emit('leave-room');
   }
+
+  try {
+    sessionStorage.removeItem('syncplay_room_id');
+    sessionStorage.removeItem('syncplay_user_name');
+  } catch (_) {}
 
   // Reset UI
   playerCard.classList.add('hidden');
