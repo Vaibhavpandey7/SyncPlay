@@ -357,6 +357,10 @@ function connectSocket() {
           applyMode();
           renderUsers(res.room.users);
           showToast('🟢 Reconnected to room');
+        } else if (res && res.error) {
+          showToast('❌ ' + res.error);
+          state.roomId = null;
+          showPage('home');
         }
       });
     }
