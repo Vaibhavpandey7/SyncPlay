@@ -41,6 +41,8 @@ class WebAudioSyncEngine {
     this.duration = 0;
     this.onEnded = null;
     this.volume = 1.0;
+    this.pendingPlay = null;  // Queued play request while buffer is fetching/decoding
+    this.isUnlocked = false;
   }
 
   init() {
@@ -55,6 +57,41 @@ class WebAudioSyncEngine {
     }
   }
 
+  unlock() {
+    this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().then(() => {
+        this.isUnlocked = true;
+        this.updateUnlockUI();
+        if (state.roomIsPlaying && this.buffer && !this.isPlaying) {
+          const nowServer = Date.now() + state.clockOffset;
+          this.playAt(this.startPosition, nowServer, state.clockOffset);
+        }
+      }).catch(() => {});
+    } else {
+      this.isUnlocked = true;
+      this.updateUnlockUI();
+    }
+
+    // Play a 1-sample silent sound buffer to guarantee iOS WebKit audio hardware engagement
+    try {
+      const silentBuf = this.ctx.createBuffer(1, 1, 22050);
+      const src = this.ctx.createBufferSource();
+      src.buffer = silentBuf;
+      src.connect(this.ctx.destination);
+      src.start(0);
+    } catch (_) {}
+  }
+
+  updateUnlockUI() {
+    const banner = document.getElementById('audio-unlock-banner');
+    if (!banner) return;
+    const isSuspended = this.ctx && this.ctx.state === 'suspended';
+    const shouldShow = state.roomIsPlaying && isSuspended;
+    banner.classList.toggle('hidden', !shouldShow);
+  }
+
   async loadTrack(url) {
     this.init();
     this.stop();
@@ -64,15 +101,35 @@ class WebAudioSyncEngine {
     const res = await fetch(url);
     if (!res.ok) throw new Error('Failed to fetch audio stream');
     const arrayBuf = await res.arrayBuffer();
-    this.buffer = await this.ctx.decodeAudioData(arrayBuf);
+
+    // Universal compatibility with older iOS WebKit callback and modern Promise
+    this.buffer = await new Promise((resolve, reject) => {
+      this.ctx.decodeAudioData(
+        arrayBuf,
+        decoded => resolve(decoded),
+        err => reject(err || new Error('Audio decode error'))
+      );
+    });
+
     this.duration = this.buffer.duration;
+
+    // If a play command arrived while downloading/decoding, immediately trigger it!
+    if (this.pendingPlay) {
+      const p = this.pendingPlay;
+      this.pendingPlay = null;
+      this.playAt(p.position, p.playAtServerTime, p.clockOffset);
+    }
+
     return this.duration;
   }
 
   playAt(position, playAtServerTime, clockOffset) {
     this.init();
     this.stop();
-    if (!this.buffer) return;
+    if (!this.buffer) {
+      this.pendingPlay = { position, playAtServerTime, clockOffset };
+      return;
+    }
 
     // Convert server time to local time
     const localPlayAt = playAtServerTime - clockOffset;
@@ -105,6 +162,7 @@ class WebAudioSyncEngine {
     this.startTime = audioCtxStart;
     this.startPosition = startPos;
     this.isPlaying = true;
+    this.updateUnlockUI();
   }
 
   pause(position = null) {
@@ -114,6 +172,7 @@ class WebAudioSyncEngine {
       this.startPosition = this.getCurrentTime();
     }
     this.stop();
+    this.updateUnlockUI();
   }
 
   stop() {
@@ -1118,9 +1177,23 @@ btnLeave.addEventListener('click', () => {
 });
 
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('touchstart', () => audioEngine.init(), { once: true });
-document.addEventListener('click', () => audioEngine.init(), { once: true });
+// ─── Init & Gesture Audio Unlocking ──────────────────────────────────────────
+const unlockAudio = () => {
+  audioEngine.unlock();
+};
+
+['touchstart', 'touchend', 'click', 'pointerdown'].forEach(evt => {
+  document.addEventListener(evt, unlockAudio, { passive: true });
+});
+
+const bannerEl = document.getElementById('audio-unlock-banner');
+if (bannerEl) {
+  bannerEl.addEventListener('click', e => {
+    e.stopPropagation();
+    audioEngine.unlock();
+  });
+}
+
 connectSocket();
 syncClock();
 setInterval(syncClock, 60000); // Background NTP clock re-sync every 60 seconds

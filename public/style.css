@@ -333,3 +333,73 @@ ul{list-style:none}
   .room-info { gap: 6px; }
   .room-label { display: none; }
 }
+
+/* ─── Mobile Audio Unlock Banner ─── */
+.audio-unlock-banner {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 32px);
+  max-width: 460px;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.95), rgba(37, 99, 235, 0.95));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 16px;
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), 0 0 24px rgba(124, 58, 237, 0.45);
+  z-index: 9999;
+  animation: unlock-pulse 2s infinite ease-in-out;
+  cursor: pointer;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.audio-unlock-banner.hidden {
+  display: none !important;
+}
+
+@keyframes unlock-pulse {
+  0%, 100% { transform: translateX(-50%) scale(1); }
+  50% { transform: translateX(-50%) scale(1.02); }
+}
+
+.unlock-icon {
+  font-size: 1.8rem;
+  line-height: 1;
+}
+
+.unlock-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  text-align: left;
+}
+
+.unlock-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #ffffff;
+}
+
+.unlock-sub {
+  font-size: 0.76rem;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 2px;
+}
+
+.btn-unlock {
+  background: #ffffff;
+  color: #4f46e5;
+  border: none;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
