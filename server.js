@@ -6,9 +6,22 @@ const multer = require('multer');
 const fs = require('fs');
 const { execFile, spawn } = require('child_process');
 
+process.on('uncaughtException', err => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: { origin: '*' },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectTimeout: 45000,
+  transports: ['websocket', 'polling']
+});
 
 const PORT = process.env.PORT || 3000;
 const SYNC_DELAY = 500; // ms — 500ms buffering cushion for high-precision WebAudio alignment
@@ -51,7 +64,7 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
     positionHistory: [],   // Server-side rolling 5-sample buffer for jitter-free room sync
     hostHardwareLatency: 0, // Hardware audio output latency of Host device
     downloading: false,
-    users: new Map([[token, { name: hostName, isHost: true, socketId: hostSocketId, offline: false, disconnectTimer: null }]])
+    users: new Map([[token, { name: hostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, disconnectTimer: null }]])
   };
 }
 
@@ -238,7 +251,8 @@ async function downloadViaConverterAPI(videoId, roomId) {
   io.to(roomId).emit('download-progress', { percent: 15, status: 'connecting' });
 
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*'
   };
 
   const startRes = await fetch(`https://loader.to/ajax/download.php?format=mp3&url=https://www.youtube.com/watch?v=${videoId}`, {
@@ -308,11 +322,17 @@ async function downloadAudio(videoId, roomId) {
   const hasCookiesFile = fs.existsSync(COOKIES_FILE);
 
   const attempts = [
-    { client: 'visionos,ios,web,android', useCookies: false, fromBrowser: false },
+    // 1. Android/iOS client (high bypass rate against bot checks)
+    ...(hasCookiesFile ? [{ client: 'android,ios,mweb', useCookies: true, fromBrowser: false }] : []),
+    { client: 'android,ios,mweb', useCookies: false, fromBrowser: false },
+    // 2. Browser cookies if specified
     ...(browserCookies ? [{ client: 'default', useCookies: false, fromBrowser: browserCookies }] : []),
+    // 3. Cookies file with default web client
     ...(hasCookiesFile ? [{ client: 'default', useCookies: true, fromBrowser: false }] : []),
-    { client: 'default', useCookies: false, fromBrowser: false },
-    { client: 'mweb,web', useCookies: false, fromBrowser: false }
+    // 4. VisionOS / Web / MWeb clients
+    { client: 'visionos,ios,web', useCookies: false, fromBrowser: false },
+    { client: 'mweb,web', useCookies: false, fromBrowser: false },
+    { client: 'default', useCookies: false, fromBrowser: false }
   ];
 
   let lastError = null;
@@ -328,8 +348,7 @@ async function downloadAudio(videoId, roomId) {
     }
   }
 
-  // If direct yt-dlp extraction failed (e.g. cloud datacenter IP block or bot check),
-  // automatically fall back to cloud converter API
+  // Automatic fallback to Cloud Converter API (bypasses datacenter blocks completely)
   console.log(`[downloadAudio] yt-dlp attempts failed for ${videoId}. Falling back to Cloud Converter API...`);
   try {
     return await downloadViaConverterAPI(videoId, roomId);
@@ -346,7 +365,9 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
       '--no-playlist',
       '--force-overwrites',
       '--no-continue',
-      '--js-runtimes', 'node'
+      '--no-check-certificates',
+      '--prefer-free-formats',
+      '--js-runtimes', `node:${process.execPath || '/usr/bin/node'}`
     ];
 
     if (client && client !== 'default') {
@@ -458,11 +479,15 @@ async function getVideoTitle(videoId) {
   return new Promise(resolve => {
     const execArgs = [
       '--no-playlist',
-      '--js-runtimes', 'node',
+      '--no-check-certificates',
+      '--js-runtimes', `node:${process.execPath || '/usr/bin/node'}`,
       '--no-download',
       '--get-title',
       `https://www.youtube.com/watch?v=${videoId}`
     ];
+    if (fs.existsSync(COOKIES_FILE)) {
+      execArgs.push('--cookies', COOKIES_FILE);
+    }
     execFile('yt-dlp', execArgs, { timeout: 10000 }, (err, stdout) => {
       const title = (stdout || '').trim();
       resolve(title || videoId);
@@ -619,14 +644,17 @@ io.on('connection', socket => {
     socket.data.roomId = id;
     socket.data.userToken = token;
     console.log(`[Room ${id}] Created by ${userName} (token: ${token})`);
-    cb({ success: true, isHost: true, room: publicRoom(room) });
+    if (typeof cb === 'function') {
+      cb({ success: true, isHost: true, room: publicRoom(room) });
+    }
   });
 
   // Join or Rejoin room
   socket.on('join-room', ({ roomId, userName, userToken }, cb) => {
+    if (!roomId) return typeof cb === 'function' && cb({ error: 'Room ID required' });
     const id = roomId.toUpperCase();
     const room = rooms.get(id);
-    if (!room) return cb({ error: 'Room not found' });
+    if (!room) return typeof cb === 'function' && cb({ error: 'Room not found' });
 
     const token = userToken || socket.id;
     let user = room.users.get(token);
@@ -638,23 +666,27 @@ io.on('connection', socket => {
         user.disconnectTimer = null;
       }
       user.socketId = socket.id;
+      user.userToken = token;
       user.offline = false;
       if (userName) user.name = userName;
-      if (user.isHost) room.hostId = socket.id;
+      if (user.isHost) {
+        room.hostId = socket.id;
+        room.hostToken = token;
+      }
 
       socket.join(id);
       socket.data.roomId = id;
       socket.data.userToken = token;
 
-      socket.to(id).emit('user-status-changed', {
+      io.to(id).emit('user-status-changed', {
         users: publicRoom(room).users
       });
       console.log(`[Room ${id}] ${user.name} reconnected (token: ${token})`);
     } else {
       // New user joining
-      if (room.users.size >= MAX_ROOM) return cb({ error: 'Room is full (max 4)' });
+      if (room.users.size >= MAX_ROOM) return typeof cb === 'function' && cb({ error: 'Room is full (max 4)' });
 
-      user = { name: userName || 'Guest', isHost: false, socketId: socket.id, offline: false, disconnectTimer: null };
+      user = { name: userName || 'Guest', isHost: false, socketId: socket.id, userToken: token, offline: false, disconnectTimer: null };
       room.users.set(token, user);
       socket.join(id);
       socket.data.roomId = id;
@@ -679,17 +711,19 @@ io.on('connection', socket => {
       syncPlayAt = now + SYNC_DELAY;
     }
 
-    cb({
-      success: true,
-      isHost: user.isHost,
-      room: {
-        ...publicRoom(room),
-        position: syncPos,
-        joinedAt: Date.now(),
-        serverTimeAtUpdate: Date.now(),
-        playAt: syncPlayAt
-      }
-    });
+    if (typeof cb === 'function') {
+      cb({
+        success: true,
+        isHost: user.isHost,
+        room: {
+          ...publicRoom(room),
+          position: syncPos,
+          joinedAt: Date.now(),
+          serverTimeAtUpdate: Date.now(),
+          playAt: syncPlayAt
+        }
+      });
+    }
   });
 
   // Playback events — any user can send these
@@ -763,18 +797,16 @@ io.on('connection', socket => {
     io.to(room.id).emit('seek', { position: pos, playAt, isPlaying: room.isPlaying });
   });
 
-
-
-
   // Playlist track selection (Host only)
   socket.on('select-track', ({ index, autoPlay }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || index < 0 || index >= room.playlist.length) return;
 
-    if (socket.id !== room.hostId) {
+    if (socket.id !== room.hostId && socket.data.userToken !== room.hostToken) {
       return socket.emit('error-msg', { message: 'Only the host can switch songs' });
     }
 
+    const now = Date.now();
     const track = room.playlist[index];
     const shouldAutoPlay = autoPlay === true || room.isPlaying;
     const TRACK_LOAD_SYNC_DELAY = 1200; // 1.2s cushion allows mobile devices to fetch & decode audio
@@ -818,15 +850,15 @@ io.on('connection', socket => {
     room.users.forEach(u => u.isHost = false);
     newHost.isHost = true;
     room.hostId = newHost.socketId;
-    room.hostToken = newHost.userToken;
+    room.hostToken = targetUserToken;
 
     io.to(room.id).emit('user-status-changed', {
       users: publicRoom(room).users,
       newHostName: newHost.name,
-      newHostToken: newHost.userToken
+      newHostToken: targetUserToken
     });
 
-    console.log(`[Room ${room.id}] Host transferred to ${newHost.name} (token: ${newHost.userToken})`);
+    console.log(`[Room ${room.id}] Host transferred to ${newHost.name} (token: ${targetUserToken})`);
     if (typeof cb === 'function') cb({ success: true });
   });
 
@@ -835,7 +867,7 @@ io.on('connection', socket => {
     const room = rooms.get(socket.data.roomId);
     if (!room || index < 0 || index >= room.playlist.length) return;
 
-    if (socket.id !== room.hostId) {
+    if (socket.id !== room.hostId && socket.data.userToken !== room.hostToken) {
       return socket.emit('error-msg', { message: 'Only the host can remove songs' });
     }
 
@@ -925,9 +957,14 @@ io.on('connection', socket => {
     let newHostId = room.hostId;
     if (wasHost) {
       const nextOnlineUser = remainingUsers.find(u => !u.offline) || remainingUsers[0];
-      nextOnlineUser.isHost = true;
-      room.hostId = nextOnlineUser.socketId;
-      newHostId = nextOnlineUser.socketId;
+      if (nextOnlineUser) {
+        nextOnlineUser.isHost = true;
+        room.hostId = nextOnlineUser.socketId;
+        for (const [t, u] of room.users.entries()) {
+          if (u === nextOnlineUser) { room.hostToken = t; break; }
+        }
+        newHostId = nextOnlineUser.socketId;
+      }
     }
 
     // Pause room playback if host leaves or no online users remain
@@ -945,10 +982,12 @@ io.on('connection', socket => {
     });
   });
 
-  // Disconnect with 15-second grace window for reconnection
-  socket.on('disconnect', () => {
+  // Disconnect with 30-second grace window for reconnection
+  socket.on('disconnect', (reason) => {
     const roomId = socket.data.roomId;
     const userToken = socket.data.userToken;
+    console.log(`[Socket] -${socket.id} disconnected (${reason})`);
+    if (!roomId) return;
     const room = rooms.get(roomId);
     if (!room) return;
 
@@ -966,19 +1005,15 @@ io.on('connection', socket => {
     if (!user) return;
 
     user.offline = true;
-    console.log(`[Room ${roomId}] ${user.name} went offline (15s grace window started)`);
-
-    // If host went offline, auto-pause room playback
-    if (user.isHost) {
-      room.isPlaying = false;
-      io.to(roomId).emit('pause', { position: room.position });
-    }
+    console.log(`[Room ${roomId}] ${user.name} went offline (30s grace window started)`);
 
     io.to(roomId).emit('user-status-changed', {
       users: publicRoom(room).users
     });
 
-    // 15-second grace period before officially removing user / reassigning host
+    if (user.disconnectTimer) clearTimeout(user.disconnectTimer);
+
+    // 30-second grace period before officially removing user / reassigning host
     user.disconnectTimer = setTimeout(() => {
       if (!user.offline) return; // User reconnected during grace period!
 
@@ -995,18 +1030,23 @@ io.on('connection', socket => {
       let newHostId = room.hostId;
       if (wasHost) {
         const nextOnlineUser = remainingUsers.find(u => !u.offline) || remainingUsers[0];
-        nextOnlineUser.isHost = true;
-        room.hostId = nextOnlineUser.socketId;
-        newHostId = nextOnlineUser.socketId;
+        if (nextOnlineUser) {
+          nextOnlineUser.isHost = true;
+          room.hostId = nextOnlineUser.socketId;
+          for (const [t, u] of room.users.entries()) {
+            if (u === nextOnlineUser) { room.hostToken = t; break; }
+          }
+          newHostId = nextOnlineUser.socketId;
+        }
       }
 
       io.to(roomId).emit('user-left', {
-        userId: socket.id,
+        userId: user.socketId || socket.id,
         name: user.name,
         users: publicRoom(room).users,
         newHostId
       });
-    }, 15000);
+    }, 30000);
   });
 });
 

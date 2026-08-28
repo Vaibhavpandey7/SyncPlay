@@ -296,17 +296,35 @@ function setPlayingVisuals(playing) {
 // ─── NTP Clock Sync ───────────────────────────────────────────────────────────
 
 async function syncClock() {
-  setSyncStatus('syncing');
+  if (!state.isHost && syncLabel.textContent === 'Sync error') {
+    setSyncStatus('syncing');
+  }
   const samples = [];
   
   // Use Socket.io WebSocket ping if available for ultra-low latency, fallback to HTTP
   const getPing = () => {
     if (state.socket && state.socket.connected) {
       return new Promise(resolve => {
-        state.socket.emit('ping-clock', ({ serverTime }) => resolve(serverTime));
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          fetch('/ping')
+            .then(r => r.json())
+            .then(d => resolve(d.serverTime))
+            .catch(() => resolve(null));
+        }, 1500);
+
+        state.socket.emit('ping-clock', res => {
+          if (timedOut) return;
+          clearTimeout(timer);
+          resolve(res?.serverTime || null);
+        });
       });
     }
-    return fetch('/ping').then(r => r.json()).then(d => d.serverTime);
+    return fetch('/ping')
+      .then(r => r.json())
+      .then(d => d.serverTime)
+      .catch(() => null);
   };
 
   for (let i = 0; i < 5; i++) {
@@ -321,7 +339,9 @@ async function syncClock() {
   if (samples.length > 0) {
     samples.sort((a, b) => a - b);
     state.clockOffset = samples[Math.floor(samples.length / 2)];
-    setSyncStatus('synced');
+    if (!state.isHost) {
+      setSyncStatus('synced');
+    }
     console.log(`[NTP] offset=${state.clockOffset.toFixed(1)}ms`);
   }
 }
@@ -340,11 +360,21 @@ function getUserToken() {
 
 function connectSocket() {
   if (state.socket && state.socket.connected) return;
-  if (state.socket) state.socket.disconnect();
-  state.socket = io();
+  if (state.socket) {
+    state.socket.removeAllListeners();
+    state.socket.disconnect();
+  }
+  state.socket = io({
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 4000,
+    timeout: 20000
+  });
 
   state.socket.on('connect', () => {
-    console.log('[Socket]', state.socket.id);
+    console.log('[Socket] Connected:', state.socket.id);
     // Auto-reconnect to room if already joined
     if (state.roomId) {
       console.log('[Socket] Rejoining room:', state.roomId);
@@ -361,7 +391,8 @@ function connectSocket() {
         } else if (res && res.error) {
           showToast('❌ ' + res.error);
           state.roomId = null;
-          showPage('home');
+          state.isHost = false;
+          showPage('landing');
         }
       });
     }
@@ -370,7 +401,7 @@ function connectSocket() {
   state.socket.on('disconnect', (reason) => {
     if (reason === 'io client disconnect') return;
     setSyncStatus('error');
-    showToast('⚠️ Disconnected from server. Reconnecting…');
+    showToast('⚠️ Disconnected from server. Reconnecting…', 3000);
   });
 
   state.socket.on('user-status-changed', ({ users, newHostName }) => {
