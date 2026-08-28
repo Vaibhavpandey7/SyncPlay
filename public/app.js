@@ -853,8 +853,8 @@ audioEngine.onEnded = () => {
   state.roomIsPlaying = false;
   if (state.isHost && state.playlist && state.currentTrackIndex + 1 < state.playlist.length) {
     const nextIdx = state.currentTrackIndex + 1;
-    showToast(`▶ Auto-playing next in queue: "${state.playlist[nextIdx].trackName}"`);
-    state.socket.emit('select-track', { index: nextIdx, autoPlay: true });
+    showToast(`⏭ Loaded next track: "${state.playlist[nextIdx].trackName}" (click Play to start)`);
+    state.socket.emit('select-track', { index: nextIdx, autoPlay: false });
   }
 };
 
@@ -1094,8 +1094,8 @@ function renderPlaylist(playlist, currentIndex) {
         return;
       }
       if (idx === currentIndex) return;
-      showToast(`Switching to "${track.trackName}"…`);
-      state.socket.emit('select-track', { index: idx, autoPlay: true });
+      showToast(`Loading "${track.trackName}"…`);
+      state.socket.emit('select-track', { index: idx, autoPlay: false });
     });
 
     // Delete track click (Host only)

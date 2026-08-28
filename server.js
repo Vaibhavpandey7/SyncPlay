@@ -915,28 +915,25 @@ io.on('connection', socket => {
 
     const now = Date.now();
     const track = room.playlist[index];
-    const shouldAutoPlay = autoPlay === true || room.isPlaying;
-    const TRACK_LOAD_SYNC_DELAY = 1800; // 1.8s cushion allows all mobile & desktop devices to fetch & decode in sync
-    const playAt = shouldAutoPlay ? now + TRACK_LOAD_SYNC_DELAY : null;
 
     room.currentTrackIndex = index;
     room.audioFile = track.audioFile;
     room.trackName = track.trackName;
-    room.isPlaying = shouldAutoPlay;
+    room.isPlaying = false;
     room.position = 0;
     room.positionHistory = [];
-    room.serverTimeAtUpdate = playAt || now;
-    if (playAt) room.playAt = playAt;
+    room.serverTimeAtUpdate = now;
+    delete room.playAt;
 
     io.to(room.id).emit('track-loaded', {
       trackName: track.trackName,
       audioUrl: getAudioUrl(room.id, room),
       playlist: room.playlist,
       currentTrackIndex: room.currentTrackIndex,
-      autoPlay: shouldAutoPlay,
-      playAt
+      autoPlay: false,
+      playAt: null
     });
-    console.log(`[Room ${room.id}] Switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
+    console.log(`[Room ${room.id}] Switched to track #${index}: ${track.trackName} (ready, paused)`);
   });
 
   // Transfer host privileges to another user in the room (Host only)
