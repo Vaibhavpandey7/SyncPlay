@@ -1093,7 +1093,7 @@ io.on('connection', socket => {
   });
 });
 
-// ─── Continuous Room Sync Pulse (5-second smooth interval) ──────────────────────
+// ─── Continuous Room Sync Pulse (2.5-second smooth interval) ───────────────────
 setInterval(() => {
   rooms.forEach(room => {
     if (room.isPlaying && room.users.size > 0) {
@@ -1109,7 +1109,7 @@ setInterval(() => {
       });
     }
   });
-}, 5000);
+}, 2500);
 
 // Catch-all route to serve index.html for SPA page reloads / custom URLs
 app.get('*', (req, res) => {

@@ -606,7 +606,7 @@ function connectSocket() {
   // Zone 2: 150ms < |drift| <= 500ms → Strong speed nudge (±3%)
   // Zone 3: |drift| > 500ms  → Hard seek (instant correction)
   state.socket.on('sync-pulse', ({ position, serverTime, isPlaying, hostHardwareLatency }) => {
-    if (!audioEngine.isPlaying || !isPlaying || state.isSeeking || !audioEngine.duration) return;
+    if (!isPlaying || state.isSeeking || !audioEngine.duration) return;
 
     if (state.isHost) {
       audioEngine.resetRate();
@@ -627,6 +627,17 @@ function connectSocket() {
     const totalOffsetSec = autoHwOffsetSec + userManualOffsetSec;
 
     const targetPos = position + elapsedSincePulse + totalOffsetSec;
+
+    // CRITICAL: If room is playing but guest is NOT playing yet (e.g. late buffer decode, late join, or un-muted)
+    if (!audioEngine.isPlaying) {
+      if (audioEngine.buffer && targetPos < audioEngine.duration) {
+        console.log(`[Sync] Catching up unsynced guest playback from pulse at targetPos=${targetPos.toFixed(2)}s`);
+        audioEngine.playAt(targetPos, Date.now() + state.clockOffset + 50, state.clockOffset);
+        setPlayingVisuals(true);
+        state.roomIsPlaying = true;
+      }
+      return;
+    }
 
     const curTime = audioEngine.getCurrentTime();
     const rawDrift = curTime - targetPos;
