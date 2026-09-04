@@ -1,10 +1,11 @@
 FROM node:22-slim
 
-# Install ffmpeg, python3, and curl (needed for audio conversion and yt-dlp)
+# Install ffmpeg, python3, curl, and ca-certificates (needed for audio conversion and yt-dlp)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     python3 \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install yt-dlp
@@ -19,6 +20,7 @@ RUN npm install --omit=dev
 
 # Copy source code
 COPY . .
+RUN chmod +x ./ffmpeg 2>/dev/null || true
 
 # Create cache and uploads dirs
 RUN mkdir -p cache uploads

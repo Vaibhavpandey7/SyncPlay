@@ -1,3 +1,4 @@
+console.log(`[SyncPlay] Booting server process (pid: ${process.pid}, node: ${process.version})...`);
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -265,9 +266,16 @@ function extractVideoId(input) {
   return null;
 }
 
-const FFMPEG_BIN = fs.existsSync(path.join(__dirname, 'ffmpeg'))
-  ? path.join(__dirname, 'ffmpeg')
-  : 'ffmpeg'; // fall back to system ffmpeg if available
+let FFMPEG_BIN = 'ffmpeg';
+try {
+  const localFfmpeg = path.join(__dirname, 'ffmpeg');
+  if (fs.existsSync(localFfmpeg)) {
+    fs.accessSync(localFfmpeg, fs.constants.X_OK);
+    FFMPEG_BIN = localFfmpeg;
+  }
+} catch (_) {
+  FFMPEG_BIN = 'ffmpeg';
+}
 
 function cachedPath(videoId, ext = 'mp3') {
   return path.join(CACHE, `${videoId}.${ext}`);
@@ -520,7 +528,9 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/ping', (_, res) => res.json({ serverTime: Date.now() }));
+// Health check endpoints for Railway / Render container monitors
+app.get(['/health', '/healthz'], (_, res) => res.status(200).send('OK'));
+app.get('/ping', (_, res) => res.status(200).json({ status: 'ok', serverTime: Date.now() }));
 
 app.get(['/api/room/:id', '/room/:id'], (req, res, next) => {
   const acceptsHtml = req.accepts(['json', 'html']) === 'html';
@@ -1311,6 +1321,16 @@ server.listen(PORT, '0.0.0.0', () => {
   addresses.forEach(ip => {
     console.log(`   ➜ Network (Phone/Wi-Fi): http://${ip}:${PORT}`);
   });
-  console.log('');
+  console.log(`   ➜ Healthcheck: http://localhost:${PORT}/health\n`);
+});
+
+// Graceful container termination for Railway / Docker
+process.on('SIGTERM', () => {
+  console.log('[SyncPlay] SIGTERM received. Closing HTTP server gracefully...');
+  server.close(() => process.exit(0));
+});
+process.on('SIGINT', () => {
+  console.log('[SyncPlay] SIGINT received. Closing HTTP server gracefully...');
+  server.close(() => process.exit(0));
 });
 
