@@ -11,7 +11,11 @@ const state = {
   roomId: null,
   isHost: false,
   clockOffset: 0,
-  audioOffsetMs: 0,    // user-set device speaker latency compensation (ms)
+  audioOffsetMs: parseInt(localStorage.getItem('syncplay_audio_offset') || '0', 10),    // user-set device speaker latency compensation (ms)
+  volume: parseFloat(localStorage.getItem('syncplay_volume') || '1.0'),
+  isMuted: false,
+  previousVolume: 1.0,
+  currentThumbnail: null,
   roomIsPlaying: false, // server-authoritative play state — single source of truth for button
   duration: 0,
   isSeeking: false,
@@ -35,12 +39,15 @@ class WebAudioSyncEngine {
     this.buffer = null;
     this.source = null;
     this.gainNode = null;
+    this.analyser = null;
+    this.bufferCache = new Map();     // In-memory decoded AudioBuffer cache (0ms song switching)
+    this.preloadPromises = new Map(); // In-flight preload promises
     this.startTime = 0;       // AudioContext.currentTime when playback started
     this.startPosition = 0;   // Song position (seconds) when started
     this.isPlaying = false;
     this.duration = 0;
     this.onEnded = null;
-    this.volume = 1.0;
+    this.volume = !isNaN(state.volume) ? Math.max(0, Math.min(1, state.volume)) : 1.0;
     this.pendingPlay = null;  // Queued play request while buffer is fetching/decoding
     this.isUnlocked = false;
   }
@@ -50,11 +57,23 @@ class WebAudioSyncEngine {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AudioCtx();
       this.gainNode = this.ctx.createGain();
-      this.gainNode.connect(this.ctx.destination);
+      this.gainNode.gain.value = this.volume;
+      this.analyser = this.ctx.createAnalyser();
+      this.analyser.fftSize = 64;
+      this.analyser.smoothingTimeConstant = 0.8;
+      this.gainNode.connect(this.analyser);
+      this.analyser.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
     }
+  }
+
+  getFrequencyData() {
+    if (!this.analyser) return null;
+    const data = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analyser.getByteFrequencyData(data);
+    return data;
   }
 
   unlock() {
@@ -98,6 +117,36 @@ class WebAudioSyncEngine {
     this.buffer = null;
     this.duration = 0;
 
+    // 1. Instant Cache Hit in Memory (0ms download, 0ms decode!)
+    if (this.bufferCache.has(url)) {
+      const cached = this.bufferCache.get(url);
+      this.buffer = cached.buffer;
+      this.duration = cached.duration;
+      if (this.pendingPlay) {
+        const p = this.pendingPlay;
+        this.pendingPlay = null;
+        this.playAt(p.position, p.playAtServerTime, p.clockOffset);
+      }
+      return this.duration;
+    }
+
+    // 2. Check if background pre-loading already fetched and decoded this track
+    if (this.preloadPromises.has(url)) {
+      try {
+        const cached = await this.preloadPromises.get(url);
+        if (cached && cached.buffer) {
+          this.buffer = cached.buffer;
+          this.duration = cached.duration;
+          if (this.pendingPlay) {
+            const p = this.pendingPlay;
+            this.pendingPlay = null;
+            this.playAt(p.position, p.playAtServerTime, p.clockOffset);
+          }
+          return this.duration;
+        }
+      } catch (_) {}
+    }
+
     let res = null;
     let lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -107,7 +156,7 @@ class WebAudioSyncEngine {
       } catch (e) {
         lastErr = e;
       }
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
     }
 
     if (!res || !res.ok) {
@@ -128,6 +177,13 @@ class WebAudioSyncEngine {
 
     this.duration = this.buffer.duration;
 
+    // Cache decoded buffer in memory (LRU max 6 tracks ~60MB RAM)
+    if (this.bufferCache.size >= 6) {
+      const oldestKey = this.bufferCache.keys().next().value;
+      this.bufferCache.delete(oldestKey);
+    }
+    this.bufferCache.set(url, { buffer: this.buffer, duration: this.duration });
+
     // If a play command arrived while downloading/decoding, immediately trigger it!
     if (this.pendingPlay) {
       const p = this.pendingPlay;
@@ -136,6 +192,31 @@ class WebAudioSyncEngine {
     }
 
     return this.duration;
+  }
+
+  // Silently pre-fetch and decode upcoming track in background for gapless playback
+  preloadTrack(url) {
+    if (!url || this.bufferCache.has(url) || this.preloadPromises.has(url)) return;
+    const promise = (async () => {
+      this.init();
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Preload fetch failed');
+      const arrayBuf = await res.arrayBuffer();
+      const buffer = await new Promise((resolve, reject) => {
+        this.ctx.decodeAudioData(arrayBuf, resolve, reject);
+      });
+      const data = { buffer, duration: buffer.duration };
+      if (this.bufferCache.size >= 6) {
+        const oldestKey = this.bufferCache.keys().next().value;
+        this.bufferCache.delete(oldestKey);
+      }
+      this.bufferCache.set(url, data);
+      this.preloadPromises.delete(url);
+      return data;
+    })().catch(() => {
+      this.preloadPromises.delete(url);
+    });
+    this.preloadPromises.set(url, promise);
   }
 
   playAt(position, playAtServerTime, clockOffset) {
@@ -255,7 +336,6 @@ const audioEngine = new WebAudioSyncEngine();
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const pages = { landing: $('page-landing'), room: $('page-room') };
-const audio = $('audio-el');
 
 // Landing
 const inputCreateName = $('input-create-name');
@@ -268,6 +348,7 @@ const landingError    = $('landing-error');
 // Header
 const displayRoomId   = $('display-room-id');
 const btnCopyId       = $('btn-copy-id');
+const btnShareRoom    = $('btn-share-room');
 const btnLeave        = $('btn-leave');
 
 // Load panel
@@ -290,6 +371,8 @@ const opProgressLabel = $('op-progress-label');
 const guestWaiting    = $('guest-waiting');
 const hostPrompt      = $('host-prompt');
 const playerCard      = $('player-card');
+const albumArtWrap    = $('album-art-wrap');
+const albumArtImg     = $('album-art-img');
 const artBars         = $('art-bars');
 const displayTrack    = $('display-track-name');
 const controlsBar     = $('controls-bar');
@@ -298,6 +381,7 @@ const iconPlay        = $('icon-play');
 const iconPause       = $('icon-pause');
 const btnSeekBack     = $('btn-seek-back');
 const btnSeekFwd      = $('btn-seek-fwd');
+const btnMute         = $('btn-mute');
 const volumeSlider    = $('volume-slider');
 const scrubTrack      = $('scrub-track');
 const scrubFill       = $('scrub-fill');
@@ -401,22 +485,27 @@ async function syncClock() {
       .catch(() => null);
   };
 
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 6; i++) {
     const t1 = Date.now();
     const serverTime = await getPing();
     const t3 = Date.now();
     if (serverTime) {
-      samples.push(serverTime - (t1 + t3) / 2);
+      const rtt = t3 - t1;
+      const offset = serverTime - (t1 + t3) / 2;
+      samples.push({ rtt, offset });
     }
-    await new Promise(r => setTimeout(r, 60));
+    await new Promise(r => setTimeout(r, 40));
   }
   if (samples.length > 0) {
-    samples.sort((a, b) => a - b);
-    state.clockOffset = samples[Math.floor(samples.length / 2)];
+    // Filter by lowest RTT (least network delay jitter)
+    samples.sort((a, b) => a.rtt - b.rtt);
+    const bestCandidates = samples.slice(0, Math.min(3, samples.length));
+    bestCandidates.sort((a, b) => a.offset - b.offset);
+    state.clockOffset = bestCandidates[Math.floor(bestCandidates.length / 2)].offset;
     if (!state.isHost) {
       setSyncStatus('synced');
     }
-    console.log(`[NTP] offset=${state.clockOffset.toFixed(1)}ms`);
+    console.log(`[NTP] bestRTT=${samples[0].rtt}ms offset=${state.clockOffset.toFixed(1)}ms`);
   }
 }
 
@@ -540,7 +629,7 @@ function connectSocket() {
   });
 
   // Track ready — load audio for everyone
-  state.socket.on('track-loaded', ({ trackName, audioUrl, playlist, currentTrackIndex, autoPlay, playAt }) => {
+  state.socket.on('track-loaded', ({ trackName, thumbnail, audioUrl, playlist, currentTrackIndex, autoPlay, playAt }) => {
     opProgressWrap.classList.add('hidden');
     state.roomIsPlaying = !!autoPlay;
     state.offsetHistory = [];
@@ -549,7 +638,7 @@ function connectSocket() {
       if (autoPlay && playAt) {
         schedulePlay(0, playAt);
       }
-    });
+    }, thumbnail);
     if (playlist) {
       state.playlist = playlist;
       state.currentTrackIndex = currentTrackIndex;
@@ -701,8 +790,61 @@ function schedulePlay(position, playAt) {
 }
 
 
+// ─── Real-Time WebAudio Spectrum Visualizer ──────────────────────────────────
+let visualizerAnimFrame = null;
+function startVisualizerLoop() {
+  if (visualizerAnimFrame) cancelAnimationFrame(visualizerAnimFrame);
+  const spans = artBars ? artBars.querySelectorAll('span') : [];
+  if (!spans || spans.length === 0) return;
+
+  const updateSpectrum = () => {
+    if (audioEngine.isPlaying && !artBars.classList.contains('hidden')) {
+      const freqs = audioEngine.getFrequencyData();
+      if (freqs && freqs.length > 0) {
+        for (let i = 0; i < spans.length; i++) {
+          const bin = Math.min(freqs.length - 1, Math.floor(i * (freqs.length / spans.length)));
+          const val = freqs[bin]; // 0 - 255
+          const heightPx = Math.max(5, Math.min(42, Math.round((val / 255) * 42)));
+          spans[i].style.height = `${heightPx}px`;
+        }
+      }
+    } else {
+      spans.forEach(s => s.style.height = '');
+    }
+    visualizerAnimFrame = requestAnimationFrame(updateSpectrum);
+  };
+  visualizerAnimFrame = requestAnimationFrame(updateSpectrum);
+}
+
+// ─── MediaSession API Integration (Lockscreen & Background Controls) ──────────
+function updateMediaSession(trackName, thumbnail = null) {
+  if (!('mediaSession' in navigator)) return;
+  const artwork = thumbnail ? [{ src: thumbnail, sizes: '320x180', type: 'image/jpeg' }] : [];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: trackName || 'SyncPlay Audio',
+    artist: 'SyncPlay (Room ' + (state.roomId || 'Shared') + ')',
+    album: 'SyncPlay',
+    artwork
+  });
+
+  try {
+    navigator.mediaSession.setActionHandler('play', () => {
+      if (state.isHost && !state.roomIsPlaying) btnPlayPause.click();
+    });
+    navigator.mediaSession.setActionHandler('pause', () => {
+      if (state.isHost && state.roomIsPlaying) btnPlayPause.click();
+    });
+    navigator.mediaSession.setActionHandler('seekbackward', () => {
+      if (state.isHost) btnSeekBack.click();
+    });
+    navigator.mediaSession.setActionHandler('seekforward', () => {
+      if (state.isHost) btnSeekFwd.click();
+    });
+  } catch (_) {}
+}
+
 // ─── Load audio ───────────────────────────────────────────────────────────────
-async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null) {
+async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, thumbnail = null) {
   clearTimeout(state.sync.playTimeout);
   audioEngine.pause();
   setPlayingVisuals(false);
@@ -713,6 +855,21 @@ async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null) {
   playerCard.classList.remove('hidden');
   controlsBar.classList.remove('hidden');
   displayTrack.textContent = trackName || 'Unknown Track';
+
+  state.currentThumbnail = thumbnail || null;
+  if (albumArtImg) {
+    if (thumbnail) {
+      albumArtImg.src = thumbnail;
+      albumArtImg.classList.remove('hidden');
+      albumArtWrap?.classList.add('has-thumb');
+    } else {
+      albumArtImg.classList.add('hidden');
+      albumArtWrap?.classList.remove('has-thumb');
+    }
+  }
+
+  updateMediaSession(trackName, thumbnail);
+  startVisualizerLoop();
 
   try {
     showToast('⏳ Decoding audio buffer…');
@@ -738,6 +895,16 @@ function startProgressLoop() {
     const pct = (curTime / audioEngine.duration) * 100;
     scrubFill.style.width = pct + '%';
     displayCurrent.textContent = fmt(curTime);
+
+    // Background Pre-Buffering: Silently preload next track when current song reaches 70% or 25s left
+    if (state.playlist && state.currentTrackIndex + 1 < state.playlist.length && (pct >= 70 || (audioEngine.duration - curTime <= 25))) {
+      const nextIdx = state.currentTrackIndex + 1;
+      const nextTrack = state.playlist[nextIdx];
+      if (nextTrack) {
+        const nextUrl = `/audio/${state.roomId}?idx=${nextIdx}&t=${encodeURIComponent(nextTrack.id || 'track')}`;
+        audioEngine.preloadTrack(nextUrl);
+      }
+    }
 
     // Host emits real-time position pulse every 2 seconds
     // serverTime = current server epoch: Date.now() + clockOffset
@@ -789,7 +956,35 @@ btnSeekFwd.addEventListener('click', () => {
   state.socket.emit('seek', { position: pos });
 });
 
-volumeSlider.addEventListener('input', () => { audioEngine.setVolume(parseFloat(volumeSlider.value)); });
+function toggleMute() {
+  state.isMuted = !state.isMuted;
+  if (state.isMuted) {
+    state.previousVolume = audioEngine.volume || 1;
+    audioEngine.setVolume(0);
+    if (volumeSlider) volumeSlider.value = 0;
+    btnMute?.classList.add('muted');
+  } else {
+    const restoredVol = state.previousVolume > 0 ? state.previousVolume : 1;
+    audioEngine.setVolume(restoredVol);
+    if (volumeSlider) volumeSlider.value = restoredVol;
+    btnMute?.classList.remove('muted');
+    try { localStorage.setItem('syncplay_volume', String(restoredVol)); } catch (_) {}
+  }
+}
+btnMute?.addEventListener('click', toggleMute);
+
+if (volumeSlider) {
+  volumeSlider.value = !isNaN(state.volume) ? state.volume : 1;
+  volumeSlider.addEventListener('input', () => {
+    const v = parseFloat(volumeSlider.value);
+    audioEngine.setVolume(v);
+    if (v > 0 && state.isMuted) {
+      state.isMuted = false;
+      btnMute?.classList.remove('muted');
+    }
+    try { localStorage.setItem('syncplay_volume', String(v)); } catch (_) {}
+  });
+}
 
 // Audio offset slider — compensates for device hardware speaker latency
 // Scrubbing — mouse + touch support
@@ -841,12 +1036,18 @@ function doScrub(e) {
 }
 const offsetSlider  = $('offset-slider');
 const offsetDisplay = $('offset-display');
-offsetSlider.addEventListener('input', () => {
-  state.audioOffsetMs = parseInt(offsetSlider.value, 10);
+if (offsetSlider && offsetDisplay) {
+  offsetSlider.value = state.audioOffsetMs;
   const sign = state.audioOffsetMs > 0 ? '+' : '';
   offsetDisplay.textContent = `${sign}${state.audioOffsetMs} ms`;
-  state.offsetHistory = []; // Reset moving average so new offset takes effect immediately
-});
+  offsetSlider.addEventListener('input', () => {
+    state.audioOffsetMs = parseInt(offsetSlider.value, 10);
+    const sign = state.audioOffsetMs > 0 ? '+' : '';
+    offsetDisplay.textContent = `${sign}${state.audioOffsetMs} ms`;
+    state.offsetHistory = []; // Reset moving average so new offset takes effect immediately
+    try { localStorage.setItem('syncplay_audio_offset', String(state.audioOffsetMs)); } catch (_) {}
+  });
+}
 
 audioEngine.onEnded = () => {
   setPlayingVisuals(false);
@@ -1076,9 +1277,12 @@ function renderPlaylist(playlist, currentIndex) {
     const isCurrent = idx === currentIndex;
     li.className = 'playlist-item' + (isCurrent ? ' active' : '');
     const delBtnHtml = state.isHost ? `<button class="btn-del-track" title="Remove track">✕</button>` : '';
+    const iconHtml = track.thumbnail
+      ? `<img src="${esc(track.thumbnail)}" class="playlist-thumb" alt="art" />`
+      : `<div class="playlist-icon">${isCurrent ? '▶' : (idx + 1)}</div>`;
 
     li.innerHTML = `
-      <div class="playlist-icon">${isCurrent ? '▶' : (idx + 1)}</div>
+      ${iconHtml}
       <div class="playlist-meta">
         <span class="playlist-title">${esc(track.trackName)}</span>
         <span class="playlist-by">Added by ${esc(track.addedBy || 'Someone')}</span>
@@ -1118,7 +1322,10 @@ function renderPlaylist(playlist, currentIndex) {
 
 btnCreate.addEventListener('click', async () => {
   const name = inputCreateName.value.trim() || 'Host';
-  if (!state.socket || !state.socket.connected) { connectSocket(); await syncClock(); }
+  if (!state.socket || !state.socket.connected) {
+    connectSocket();
+    if (!state.clockOffset) await syncClock();
+  }
   state.myName = name;
   state.socket.emit('create-room', { userName: name, userToken: getUserToken() }, res => {
     if (res.error) { showErr(landingError, res.error); return; }
@@ -1130,7 +1337,10 @@ btnJoin.addEventListener('click', async () => {
   const name = inputJoinName.value.trim() || 'Guest';
   const code = inputRoomCode.value.trim().toUpperCase();
   if (!code) { showErr(landingError, 'Please enter a room code.'); return; }
-  if (!state.socket || !state.socket.connected) { connectSocket(); await syncClock(); }
+  if (!state.socket || !state.socket.connected) {
+    connectSocket();
+    if (!state.clockOffset) await syncClock();
+  }
   state.myName = name;
   state.socket.emit('join-room', { roomId: code, userName: name, userToken: getUserToken() }, res => {
     if (res.error) { showErr(landingError, res.error); return; }
@@ -1172,6 +1382,8 @@ function enterRoom(roomData, isHost) {
     const joinedAt = roomData.joinedAt || Date.now();      // server epoch when we joined
     const snapshotPos = roomData.position;                  // server's live position at join time
     const idx = roomData.currentTrackIndex !== undefined ? roomData.currentTrackIndex : 0;
+    const currentTrack = (roomData.playlist && roomData.playlist[idx]) || null;
+    const trackThumb = roomData.thumbnail || currentTrack?.thumbnail || null;
     const audioUrl = `/audio/${roomData.id}?idx=${idx}&v=${Date.now()}`;
 
     loadAudio(audioUrl, roomData.trackName, 0, () => {
@@ -1183,7 +1395,7 @@ function enterRoom(roomData, isHost) {
         schedulePlay(livePos, livePlayAt);
         console.log(`[LateJoin] snapshotPos=${snapshotPos.toFixed(2)}s decodeElapsed=${decodeElapsedSec.toFixed(2)}s livePos=${livePos.toFixed(2)}s`);
       }
-    });
+    }, trackThumb);
   } else if (roomData.downloading) {
     hostPrompt.classList.add('hidden');
     opProgressWrap.classList.remove('hidden');
@@ -1200,6 +1412,22 @@ function enterRoom(roomData, isHost) {
 
 btnCopyId.addEventListener('click', () => {
   navigator.clipboard.writeText(state.roomId).then(() => showToast('✅ Room code copied!'));
+});
+
+btnShareRoom?.addEventListener('click', () => {
+  if (!state.roomId) return;
+  const shareUrl = `${window.location.origin}/?room=${state.roomId}`;
+  if (navigator.share) {
+    navigator.share({
+      title: 'SyncPlay — Listen Together',
+      text: `Join my SyncPlay listening room: ${state.roomId}!`,
+      url: shareUrl
+    }).catch(() => {
+      navigator.clipboard.writeText(shareUrl).then(() => showToast('🔗 Room invite link copied!'));
+    });
+  } else {
+    navigator.clipboard.writeText(shareUrl).then(() => showToast('🔗 Room invite link copied!'));
+  }
 });
 
 btnLeave.addEventListener('click', () => {
@@ -1228,6 +1456,15 @@ btnLeave.addEventListener('click', () => {
   displayCurrent.textContent = '0:00';
   displayDuration.textContent = '0:00';
   displayTrack.textContent = '—';
+  if (albumArtImg) {
+    albumArtImg.src = '';
+    albumArtImg.classList.add('hidden');
+    albumArtWrap?.classList.remove('has-thumb');
+  }
+  state.currentThumbnail = null;
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = null;
+  }
   usersList.innerHTML = '';
   artBars.classList.remove('playing');
   setPlayingVisuals(false);
@@ -1255,6 +1492,51 @@ if (bannerEl) {
   });
 }
 
+// ─── Keyboard Shortcuts ─────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (state.isHost && !btnPlayPause.disabled) btnPlayPause.click();
+  } else if (e.code === 'ArrowLeft') {
+    e.preventDefault();
+    if (state.isHost && !btnSeekBack.disabled) btnSeekBack.click();
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault();
+    if (state.isHost && !btnSeekFwd.disabled) btnSeekFwd.click();
+  } else if (e.code === 'KeyM') {
+    e.preventDefault();
+    toggleMute();
+  } else if (e.code === 'ArrowUp') {
+    e.preventDefault();
+    const newVol = Math.min(1, (audioEngine.volume || 1) + 0.05);
+    if (volumeSlider) { volumeSlider.value = newVol; volumeSlider.dispatchEvent(new Event('input')); }
+  } else if (e.code === 'ArrowDown') {
+    e.preventDefault();
+    const newVol = Math.max(0, (audioEngine.volume || 1) - 0.05);
+    if (volumeSlider) { volumeSlider.value = newVol; volumeSlider.dispatchEvent(new Event('input')); }
+  }
+});
+
+// ─── URL Deep-link invite query handling ──────────────────────────────────────
+function checkUrlRoomParam() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      const clean = roomParam.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+      if (clean && inputRoomCode) {
+        inputRoomCode.value = clean;
+        showToast(`🎵 Room code "${clean}" loaded from link!`);
+        if (inputJoinName && !inputJoinName.value) {
+          inputJoinName.focus();
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+checkUrlRoomParam();
 connectSocket();
 syncClock();
 setInterval(syncClock, 60000); // Background NTP clock re-sync every 60 seconds

@@ -4,6 +4,8 @@ const { Server } = require('socket.io');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const { execFile, spawn } = require('child_process');
 
 process.on('uncaughtException', err => {
@@ -39,8 +41,9 @@ const storage = multer.diskStorage({
   destination: UPLOADS,
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname) || '.mp3';
+    const safeRoomId = (req.params.roomId || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) || 'ROOM';
     const uid = Math.random().toString(36).substring(2, 8);
-    cb(null, `${req.params.roomId.toUpperCase()}_${Date.now()}_${uid}${ext}`);
+    cb(null, `${safeRoomId}_${Date.now()}_${uid}${ext}`);
   }
 });
 const upload = multer({
@@ -67,11 +70,12 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
     creatorToken: token,
     hostId: hostSocketId,
     hostToken: token,
-    playlist: [],          // array of { id, trackName, audioFile, addedBy }
+    playlist: [],          // array of { id, trackName, audioFile, addedBy, thumbnail }
     currentTrackIndex: -1,
-    audioFile: null, trackName: null,
+    audioFile: null, trackName: null, thumbnail: null,
     isPlaying: false, position: 0,
     serverTimeAtUpdate: Date.now(),
+    lastHostPulseTime: 0,  // Timestamp of latest host real-time pulse for pulse de-duplication
     positionHistory: [],   // Server-side rolling 5-sample buffer for jitter-free room sync
     hostHardwareLatency: 0, // Hardware audio output latency of Host device
     downloading: false,
@@ -85,6 +89,7 @@ function publicRoom(room) {
     playlist: room.playlist,
     currentTrackIndex: room.currentTrackIndex,
     trackName: room.trackName,
+    thumbnail: room.thumbnail || null,
     hasAudio: !!room.audioFile,
     downloading: room.downloading,
     isPlaying: room.isPlaying,
@@ -101,7 +106,7 @@ function publicRoom(room) {
   };
 }
 
-function addTrackToRoom(room, trackName, filePath, userName = 'Someone') {
+function addTrackToRoom(room, trackName, filePath, userName = 'Someone', thumbnail = null) {
   let idx = room.playlist.findIndex(t => t.audioFile === filePath);
   let isNew = false;
   if (idx === -1) {
@@ -109,7 +114,8 @@ function addTrackToRoom(room, trackName, filePath, userName = 'Someone') {
       id: 'tr_' + Math.random().toString(36).substring(2, 8),
       trackName,
       audioFile: filePath,
-      addedBy: userName
+      addedBy: userName,
+      thumbnail: thumbnail || null
     };
     room.playlist.push(trackObj);
     idx = room.playlist.length - 1;
@@ -123,6 +129,7 @@ function addTrackToRoom(room, trackName, filePath, userName = 'Someone') {
     room.currentTrackIndex = idx;
     room.audioFile = filePath;
     room.trackName = trackName;
+    room.thumbnail = thumbnail || (room.playlist[idx] && room.playlist[idx].thumbnail) || null;
     room.isPlaying = false;
     room.position = 0;
     room.positionHistory = [];
@@ -132,12 +139,13 @@ function addTrackToRoom(room, trackName, filePath, userName = 'Someone') {
   return { idx, isNew, activated };
 }
 
-function notifyTrackAdded(roomId, room, trackName, filePath, userName) {
-  const { activated } = addTrackToRoom(room, trackName, filePath, userName);
+function notifyTrackAdded(roomId, room, trackName, filePath, userName, thumbnail = null) {
+  const { activated } = addTrackToRoom(room, trackName, filePath, userName, thumbnail);
 
   if (activated) {
     io.to(roomId).emit('track-loaded', {
       trackName,
+      thumbnail: room.thumbnail,
       audioUrl: getAudioUrl(roomId, room),
       playlist: room.playlist,
       currentTrackIndex: room.currentTrackIndex
@@ -205,8 +213,26 @@ function cleanOrphanFiles() {
 // Run orphan cleanup every 1 hour (do not wipe active cache on boot)
 setInterval(cleanOrphanFiles, 60 * 60 * 1000);
 
+const TITLES_CACHE_FILE = path.join(CACHE, 'titles.json');
+const titleCache = new Map();
+try {
+  if (fs.existsSync(TITLES_CACHE_FILE)) {
+    const data = JSON.parse(fs.readFileSync(TITLES_CACHE_FILE, 'utf8'));
+    Object.entries(data).forEach(([k, v]) => titleCache.set(k, v));
+  }
+} catch (_) {}
+
+function saveTitleCache() {
+  try {
+    const obj = Object.fromEntries(titleCache);
+    fs.writeFileSync(TITLES_CACHE_FILE, JSON.stringify(obj), 'utf8');
+  } catch (_) {}
+}
+
 function getAudioUrl(roomId, room) {
-  return `/audio/${roomId}?idx=${room.currentTrackIndex}&v=${Date.now()}`;
+  const track = room.playlist[room.currentTrackIndex];
+  const trackId = track?.id || (room.audioFile ? path.basename(room.audioFile) : 'audio');
+  return `/audio/${roomId}?idx=${room.currentTrackIndex}&t=${encodeURIComponent(trackId)}`;
 }
 
 function genId() {
@@ -214,14 +240,29 @@ function genId() {
 }
 
 // ─── YouTube helpers ──────────────────────────────────────────────────────────
+const YOUTUBE_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
+
 function extractVideoId(input) {
+  if (!input || typeof input !== 'string') return null;
   input = input.trim();
-  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
+  if (YOUTUBE_ID_REGEX.test(input)) return input;
   try {
     const u = new URL(input);
-    if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
-    return u.searchParams.get('v');
-  } catch { return null; }
+    let candidate = null;
+    if (u.hostname.includes('youtu.be')) {
+      candidate = u.pathname.slice(1).split('/')[0].split('?')[0];
+    } else if (u.pathname.startsWith('/shorts/')) {
+      candidate = u.pathname.split('/shorts/')[1].split('/')[0].split('?')[0];
+    } else if (u.pathname.startsWith('/embed/')) {
+      candidate = u.pathname.split('/embed/')[1].split('/')[0].split('?')[0];
+    } else {
+      candidate = u.searchParams.get('v');
+    }
+    if (candidate && YOUTUBE_ID_REGEX.test(candidate)) {
+      return candidate;
+    }
+  } catch { }
+  return null;
 }
 
 const FFMPEG_BIN = fs.existsSync(path.join(__dirname, 'ffmpeg'))
@@ -316,19 +357,8 @@ async function downloadViaConverterAPI(videoId, roomId) {
   const outPath = path.join(CACHE, `${videoId}.mp3`);
   const fileStream = fs.createWriteStream(outPath);
 
-  const reader = audioRes.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    fileStream.write(Buffer.from(value));
-  }
-  fileStream.end();
-
-  // Wait for stream to finish writing to disk
-  await new Promise((res, rej) => {
-    fileStream.on('finish', res);
-    fileStream.on('error', rej);
-  });
+  // Pipe web stream to file stream with proper backpressure and error handling
+  await pipeline(Readable.fromWeb(audioRes.body), fileStream);
 
   io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
   console.log(`[Converter API] Successfully saved ${videoId}.mp3 (${fs.statSync(outPath).size} bytes)`);
@@ -340,18 +370,10 @@ async function downloadAudio(videoId, roomId) {
   const browserCookies = process.env.YTDLP_COOKIES_BROWSER;
   const hasCookiesFile = fs.existsSync(COOKIES_FILE);
 
+  // Streamlined 2-step high-speed waterfall (drops hanging 7-attempt cascade)
   const attempts = [
-    // 1. Android/iOS client (high bypass rate against bot checks)
-    ...(hasCookiesFile ? [{ client: 'android,ios,mweb', useCookies: true, fromBrowser: false }] : []),
-    { client: 'android,ios,mweb', useCookies: false, fromBrowser: false },
-    // 2. Browser cookies if specified
-    ...(browserCookies ? [{ client: 'default', useCookies: false, fromBrowser: browserCookies }] : []),
-    // 3. Cookies file with default web client
-    ...(hasCookiesFile ? [{ client: 'default', useCookies: true, fromBrowser: false }] : []),
-    // 4. VisionOS / Web / MWeb clients
-    { client: 'visionos,ios,web', useCookies: false, fromBrowser: false },
-    { client: 'mweb,web', useCookies: false, fromBrowser: false },
-    { client: 'default', useCookies: false, fromBrowser: false }
+    { client: 'android,ios', useCookies: hasCookiesFile, fromBrowser: browserCookies },
+    { client: 'mweb,web', useCookies: false, fromBrowser: false }
   ];
 
   let lastError = null;
@@ -359,7 +381,7 @@ async function downloadAudio(videoId, roomId) {
   for (let i = 0; i < attempts.length; i++) {
     const { client, useCookies, fromBrowser } = attempts[i];
     try {
-      console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${useCookies}, browser: ${fromBrowser || false})`);
+      console.log(`[yt-dlp] Attempt ${i + 1}/${attempts.length} for ${videoId} (client: ${client}, cookies: ${!!useCookies})`);
       return await executeYtdlp(videoId, roomId, client, useCookies, fromBrowser);
     } catch (err) {
       console.warn(`[yt-dlp] Attempt ${i + 1} failed for ${videoId}: ${err.message}`);
@@ -367,8 +389,8 @@ async function downloadAudio(videoId, roomId) {
     }
   }
 
-  // Automatic fallback to Cloud Converter API (bypasses datacenter blocks completely)
-  console.log(`[downloadAudio] yt-dlp attempts failed for ${videoId}. Falling back to Cloud Converter API...`);
+  // Fast-fail fallback to Cloud Converter API
+  console.log(`[downloadAudio] yt-dlp attempts failed for ${videoId}. Engaging Cloud Converter API...`);
   try {
     return await downloadViaConverterAPI(videoId, roomId);
   } catch (converterErr) {
@@ -386,6 +408,11 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
       '--no-continue',
       '--no-check-certificates',
       '--prefer-free-formats',
+      '--concurrent-fragments', '5', // 5-thread parallel chunk download
+      '--socket-timeout', '8',        // 8s timeout against stalls
+      '--retries', '1',
+      '--buffer-size', '64K',
+      '--http-chunk-size', '10M',
       '--js-runtimes', `node:${process.execPath || '/usr/bin/node'}`
     ];
 
@@ -399,12 +426,17 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
       args.push('--cookies', COOKIES_FILE);
     }
 
+    if (fs.existsSync(FFMPEG_BIN)) {
+      args.push('--ffmpeg-location', FFMPEG_BIN);
+    }
+
     args.push(
       '-f', 'ba/b',
       '--output', outTemplate,
       '--newline',
       '--no-simulate',
       '--print', 'before_dl:title',
+      '--',
       `https://www.youtube.com/watch?v=${videoId}`
     );
 
@@ -412,6 +444,12 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
     let title = videoId;
     let titleCaptured = false;
     let lastStderr = '';
+
+    // Hard kill if stalled longer than 22 seconds
+    const killTimer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      reject(new Error('yt-dlp download timed out after 22s'));
+    }, 22000);
 
     proc.stdout.on('data', chunk => {
       const lines = chunk.toString().split('\n').filter(Boolean);
@@ -446,6 +484,7 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
     });
 
     proc.on('close', async code => {
+      clearTimeout(killTimer);
       if (code !== 0) {
         return reject(new Error(lastStderr || `yt-dlp exited with code ${code}`));
       }
@@ -458,6 +497,10 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
       }
 
       if (found) {
+        if (title && title !== videoId) {
+          titleCache.set(videoId, title);
+          saveTitleCache();
+        }
         io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
         resolve({ filePath: found, title });
       } else {
@@ -466,6 +509,7 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
     });
 
     proc.on('error', err => {
+      clearTimeout(killTimer);
       if (err.code === 'ENOENT') reject(new Error('yt-dlp not found. Please install it.'));
       else reject(err);
     });
@@ -478,20 +522,33 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/ping', (_, res) => res.json({ serverTime: Date.now() }));
 
-app.get('/room/:id', (req, res) => {
-  const room = rooms.get(req.params.id.toUpperCase());
+app.get(['/api/room/:id', '/room/:id'], (req, res, next) => {
+  const acceptsHtml = req.accepts(['json', 'html']) === 'html';
+  if (req.path.startsWith('/room/') && acceptsHtml && !req.xhr && !req.headers['x-requested-with']) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  const id = (req.params.id || '').toUpperCase();
+  const room = rooms.get(id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
   res.json({ exists: true, userCount: room.users.size, maxSize: MAX_ROOM });
 });
 
 async function getVideoTitle(videoId) {
+  if (titleCache.has(videoId)) {
+    return titleCache.get(videoId);
+  }
+
   try {
     const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
-      signal: AbortSignal.timeout(4000)
+      signal: AbortSignal.timeout(2500)
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.title) return data.title;
+      if (data.title) {
+        titleCache.set(videoId, data.title);
+        saveTitleCache();
+        return data.title;
+      }
     }
   } catch (_) {}
 
@@ -499,34 +556,50 @@ async function getVideoTitle(videoId) {
     const execArgs = [
       '--no-playlist',
       '--no-check-certificates',
-      '--js-runtimes', `node:${process.execPath || '/usr/bin/node'}`,
+      '--socket-timeout', '4',
+      '--retries', '1',
       '--no-download',
-      '--get-title',
-      `https://www.youtube.com/watch?v=${videoId}`
+      '--get-title'
     ];
     if (fs.existsSync(COOKIES_FILE)) {
       execArgs.push('--cookies', COOKIES_FILE);
     }
-    execFile('yt-dlp', execArgs, { timeout: 10000 }, (err, stdout) => {
+    if (fs.existsSync(FFMPEG_BIN)) {
+      execArgs.push('--ffmpeg-location', FFMPEG_BIN);
+    }
+    execArgs.push('--', `https://www.youtube.com/watch?v=${videoId}`);
+
+    execFile('yt-dlp', execArgs, { timeout: 4500 }, (err, stdout) => {
       const title = (stdout || '').trim();
-      resolve(title || videoId);
+      const resolved = title || videoId;
+      if (title) {
+        titleCache.set(videoId, title);
+        saveTitleCache();
+      }
+      resolve(resolved);
     });
   });
 }
 
+const ROOM_ID_VALIDATOR = /^[A-Z0-9]{4,10}$/;
+
 // ── YouTube download endpoint ─────────────────────────────────────────────────
 app.post('/download/:roomId', async (req, res) => {
-  const roomId = req.params.roomId.toUpperCase();
+  const roomId = (req.params.roomId || '').toUpperCase();
+  if (!ROOM_ID_VALIDATOR.test(roomId)) return res.status(400).json({ error: 'Invalid room ID' });
+
   const room = rooms.get(roomId);
   if (!room) return res.status(404).json({ error: 'Room not found' });
   if (room.downloading) return res.status(409).json({ error: 'Already downloading' });
 
   const { url } = req.body;
   const videoId = extractVideoId(url || '');
-  if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
+  if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL or Video ID' });
+
+  const thumbnail = `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
 
   // Respond immediately — progress comes via socket
-  res.json({ success: true, videoId });
+  res.json({ success: true, videoId, thumbnail });
 
   // Cache hit — serve instantly
   const cachedFile = findCached(videoId);
@@ -534,21 +607,21 @@ app.post('/download/:roomId', async (req, res) => {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
     const trackName = await getVideoTitle(videoId);
-    notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host');
+    notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host', thumbnail);
     return;
   }
 
   // Cache miss — download
   console.log(`[Cache MISS] Downloading ${videoId} for room ${roomId}`);
   room.downloading = true;
-  io.to(roomId).emit('download-start', { videoId });
+  io.to(roomId).emit('download-start', { videoId, thumbnail });
 
   try {
     const { filePath, title } = await downloadAudio(videoId, roomId);
 
     // Fetch clean title if yt-dlp didn't provide one
     let trackName = title !== videoId ? title : videoId;
-    notifyTrackAdded(roomId, room, trackName, filePath, req.headers['x-user-name'] || 'Host');
+    notifyTrackAdded(roomId, room, trackName, filePath, req.headers['x-user-name'] || 'Host', thumbnail);
     room.downloading = false;
     console.log(`[Room ${roomId}] Track loaded: ${trackName}`);
   } catch (err) {
@@ -560,10 +633,12 @@ app.post('/download/:roomId', async (req, res) => {
 
 // ── File upload endpoint ──────────────────────────────────────────────────────
 app.post('/upload/:roomId', (req, res) => {
+  const roomId = (req.params.roomId || '').toUpperCase();
+  if (!ROOM_ID_VALIDATOR.test(roomId)) return res.status(400).json({ error: 'Invalid room ID' });
+
   req.setTimeout(300000); // 5 minutes for mobile uploads
   res.setTimeout(300000);
 
-  const roomId = req.params.roomId.toUpperCase();
   const room = rooms.get(roomId);
   const userToken = req.headers['x-user-token'];
   const userName = req.headers['x-user-name'] || 'Host';
@@ -641,8 +716,10 @@ app.get('/audio/:roomId', (req, res) => {
     return res.status(404).json({ error: 'No audio available' });
   }
 
-  const fileSize = fs.statSync(filePath).size;
+  const stats = fs.statSync(filePath);
+  const fileSize = stats.size;
   const range = req.headers.range;
+  const etag = `"${fileSize.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
 
   // Detect correct content type from file extension
   const ext = path.extname(filePath).toLowerCase();
@@ -658,9 +735,12 @@ app.get('/audio/:roomId', (req, res) => {
   };
   const contentType = MIME[ext] || 'audio/mpeg';
 
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
 
   if (range) {
     const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
@@ -671,7 +751,7 @@ app.get('/audio/:roomId', (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': end - start + 1,
       'Content-Type': contentType,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Cache-Control': 'public, max-age=86400',
     });
     fs.createReadStream(filePath, { start, end }).pipe(res);
   } else {
@@ -679,7 +759,7 @@ app.get('/audio/:roomId', (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Cache-Control': 'public, max-age=86400',
     });
     fs.createReadStream(filePath).pipe(res);
   }
@@ -859,6 +939,7 @@ io.on('connection', socket => {
 
     room.position = avgPos;
     room.serverTimeAtUpdate = now;
+    room.lastHostPulseTime = now;
 
     socket.to(room.id).emit('sync-pulse', {
       position: avgPos,
@@ -919,6 +1000,7 @@ io.on('connection', socket => {
     room.currentTrackIndex = index;
     room.audioFile = track.audioFile;
     room.trackName = track.trackName;
+    room.thumbnail = track.thumbnail || null;
     room.isPlaying = false;
     room.position = 0;
     room.positionHistory = [];
@@ -927,6 +1009,7 @@ io.on('connection', socket => {
 
     io.to(room.id).emit('track-loaded', {
       trackName: track.trackName,
+      thumbnail: room.thumbnail,
       audioUrl: getAudioUrl(room.id, room),
       playlist: room.playlist,
       currentTrackIndex: room.currentTrackIndex,
@@ -987,6 +1070,7 @@ io.on('connection', socket => {
       room.currentTrackIndex = -1;
       room.audioFile = null;
       room.trackName = null;
+      room.thumbnail = null;
       room.isPlaying = false;
       room.position = 0;
       room.positionHistory = [];
@@ -1000,6 +1084,7 @@ io.on('connection', socket => {
       room.currentTrackIndex = newIdx;
       room.audioFile = nextTrack.audioFile;
       room.trackName = nextTrack.trackName;
+      room.thumbnail = nextTrack.thumbnail || null;
       room.isPlaying = false;
       room.position = 0;
       room.positionHistory = [];
@@ -1007,6 +1092,7 @@ io.on('connection', socket => {
 
       io.to(room.id).emit('track-loaded', {
         trackName: nextTrack.trackName,
+        thumbnail: room.thumbnail,
         audioUrl: getAudioUrl(room.id, room),
         playlist: room.playlist,
         currentTrackIndex: room.currentTrackIndex
@@ -1167,11 +1253,15 @@ io.on('connection', socket => {
   });
 });
 
-// ─── Continuous Room Sync Pulse (2.5-second smooth interval) ───────────────────
+// ─── Continuous Room Sync Pulse (2.5-second fallback heartbeat) ───────────────
 setInterval(() => {
+  const now = Date.now();
   rooms.forEach(room => {
+    // If room is playing, has users, and host is not actively sending fresh pulses
     if (room.isPlaying && room.users.size > 0) {
-      const now = Date.now();
+      if (now - (room.lastHostPulseTime || 0) < 4000) {
+        return; // Suppress duplicate heartbeat when host pulse is active
+      }
       if (now < room.serverTimeAtUpdate) return; // Skip while still in buffering delay
       const elapsed = (now - room.serverTimeAtUpdate) / 1000;
       const currentPosition = room.position + elapsed;

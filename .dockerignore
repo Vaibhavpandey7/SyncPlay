@@ -4,3 +4,6 @@ uploads
 *.log
 .git
 ffmpeg
+cookies.txt
+.env
+*.env
