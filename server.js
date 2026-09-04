@@ -19,9 +19,9 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
-  pingTimeout: 120000, // 2 minutes to prevent disconnects during heavy mobile uploads
-  pingInterval: 25000,
-  connectTimeout: 60000,
+  pingTimeout: 20000,   // 20s heartbeat timeout for quick detection of dead sockets on mobile/flaky networks
+  pingInterval: 10000,  // 10s ping interval for rapid health checks
+  connectTimeout: 30000,
   transports: ['websocket', 'polling']
 });
 
@@ -431,7 +431,7 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
     }
 
     args.push(
-      '-f', 'ba/b',
+      '-f', 'ba[abr<=128]/ba[ext=m4a]/ba/b', // Prioritize 96k-128k Opus/M4A: reduces payload by 75% for slow networks while preserving studio audio fidelity
       '--output', outTemplate,
       '--newline',
       '--no-simulate',

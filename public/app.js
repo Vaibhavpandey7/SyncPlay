@@ -42,6 +42,7 @@ class WebAudioSyncEngine {
     this.analyser = null;
     this.bufferCache = new Map();     // In-memory decoded AudioBuffer cache (0ms song switching)
     this.preloadPromises = new Map(); // In-flight preload promises
+    this.currentTrackKey = null;      // Unique identifier of currently loaded track
     this.startTime = 0;       // AudioContext.currentTime when playback started
     this.startPosition = 0;   // Song position (seconds) when started
     this.isPlaying = false;
@@ -111,15 +112,23 @@ class WebAudioSyncEngine {
     banner.classList.toggle('hidden', !shouldShow);
   }
 
-  async loadTrack(url) {
+  async loadTrack(url, trackKey = null, onProgress = null) {
     this.init();
+    const cacheKey = trackKey || url;
+
+    // 0. If current active buffer matches this track key and is already loaded, skip reloading!
+    if (this.currentTrackKey === cacheKey && this.buffer) {
+      return this.duration;
+    }
+
     this.stop();
     this.buffer = null;
     this.duration = 0;
+    this.currentTrackKey = cacheKey;
 
     // 1. Instant Cache Hit in Memory (0ms download, 0ms decode!)
-    if (this.bufferCache.has(url)) {
-      const cached = this.bufferCache.get(url);
+    if (this.bufferCache.has(cacheKey) || this.bufferCache.has(url)) {
+      const cached = this.bufferCache.get(cacheKey) || this.bufferCache.get(url);
       this.buffer = cached.buffer;
       this.duration = cached.duration;
       if (this.pendingPlay) {
@@ -131,9 +140,10 @@ class WebAudioSyncEngine {
     }
 
     // 2. Check if background pre-loading already fetched and decoded this track
-    if (this.preloadPromises.has(url)) {
+    const preloadKey = this.preloadPromises.has(cacheKey) ? cacheKey : (this.preloadPromises.has(url) ? url : null);
+    if (preloadKey) {
       try {
-        const cached = await this.preloadPromises.get(url);
+        const cached = await this.preloadPromises.get(preloadKey);
         if (cached && cached.buffer) {
           this.buffer = cached.buffer;
           this.duration = cached.duration;
@@ -164,7 +174,37 @@ class WebAudioSyncEngine {
       throw new Error(statusText);
     }
 
-    const arrayBuf = await res.arrayBuffer();
+    const contentLengthHeader = res.headers.get('content-length');
+    const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : 0;
+    let arrayBuf;
+
+    // Stream download reader with progress reporting for slow/mobile connections
+    if (res.body && typeof res.body.getReader === 'function' && totalBytes > 0) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let receivedBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        receivedBytes += value.length;
+        if (onProgress) {
+          const pct = Math.min(99, Math.round((receivedBytes / totalBytes) * 100));
+          onProgress(pct, receivedBytes, totalBytes);
+        }
+      }
+
+      const allChunks = new Uint8Array(receivedBytes);
+      let position = 0;
+      for (const chunk of chunks) {
+        allChunks.set(chunk, position);
+        position += chunk.length;
+      }
+      arrayBuf = allChunks.buffer;
+    } else {
+      arrayBuf = await res.arrayBuffer();
+    }
 
     // Universal compatibility with older iOS WebKit callback and modern Promise
     this.buffer = await new Promise((resolve, reject) => {
@@ -182,7 +222,10 @@ class WebAudioSyncEngine {
       const oldestKey = this.bufferCache.keys().next().value;
       this.bufferCache.delete(oldestKey);
     }
-    this.bufferCache.set(url, { buffer: this.buffer, duration: this.duration });
+    this.bufferCache.set(cacheKey, { buffer: this.buffer, duration: this.duration });
+    if (url !== cacheKey) {
+      this.bufferCache.set(url, { buffer: this.buffer, duration: this.duration });
+    }
 
     // If a play command arrived while downloading/decoding, immediately trigger it!
     if (this.pendingPlay) {
@@ -195,8 +238,9 @@ class WebAudioSyncEngine {
   }
 
   // Silently pre-fetch and decode upcoming track in background for gapless playback
-  preloadTrack(url) {
-    if (!url || this.bufferCache.has(url) || this.preloadPromises.has(url)) return;
+  preloadTrack(url, trackKey = null) {
+    const key = trackKey || url;
+    if (!key || this.bufferCache.has(key) || this.preloadPromises.has(key)) return;
     const promise = (async () => {
       this.init();
       const res = await fetch(url);
@@ -210,13 +254,13 @@ class WebAudioSyncEngine {
         const oldestKey = this.bufferCache.keys().next().value;
         this.bufferCache.delete(oldestKey);
       }
-      this.bufferCache.set(url, data);
-      this.preloadPromises.delete(url);
+      this.bufferCache.set(key, data);
+      this.preloadPromises.delete(key);
       return data;
     })().catch(() => {
-      this.preloadPromises.delete(url);
+      this.preloadPromises.delete(key);
     });
-    this.preloadPromises.set(url, promise);
+    this.preloadPromises.set(key, promise);
   }
 
   playAt(position, playAtServerTime, clockOffset) {
@@ -366,6 +410,34 @@ const fileError       = $('file-error');
 const opProgressWrap  = $('progress-wrap');
 const opProgressBar   = $('op-progress-bar');
 const opProgressLabel = $('op-progress-label');
+
+// Network reconnection banner
+const reconnectBanner = $('reconnect-banner');
+const reconnectMsg    = $('reconnect-msg');
+
+function showReconnectBanner(msg = 'Network connection unstable. Reconnecting to SyncPlay…') {
+  if (!reconnectBanner) return;
+  if (reconnectMsg) reconnectMsg.textContent = msg;
+  reconnectBanner.classList.remove('hidden');
+}
+
+function hideReconnectBanner() {
+  if (!reconnectBanner) return;
+  reconnectBanner.classList.add('hidden');
+}
+
+// Browser online/offline event listeners
+window.addEventListener('online', () => {
+  showToast('🌐 Network connection restored');
+  hideReconnectBanner();
+  if (state.socket && !state.socket.connected) {
+    state.socket.connect();
+  }
+});
+window.addEventListener('offline', () => {
+  setSyncStatus('error');
+  showReconnectBanner('⚠️ Network connection offline. Waiting for signal…');
+});
 
 // Player states
 const guestWaiting    = $('guest-waiting');
@@ -531,13 +603,18 @@ function connectSocket() {
     transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionAttempts: Infinity,
-    reconnectionDelay: 1000,
-    reconnectionDelayMax: 4000,
-    timeout: 20000
+    reconnectionDelay: 500,     // Reconnect within 500ms after a network blip
+    reconnectionDelayMax: 2500,  // Max backoff capped at 2.5s for fast recovery
+    randomizationFactor: 0.2,
+    timeout: 15000
   });
 
   state.socket.on('connect', () => {
     console.log('[Socket] Connected:', state.socket.id);
+    hideReconnectBanner();
+    if (state.isHost) setSyncStatus('host');
+    else if (state.roomId) setSyncStatus('synced');
+
     // Auto-reconnect to room if already joined or saved in session
     const savedRoomId = state.roomId || sessionStorage.getItem('syncplay_room_id');
     const savedName = state.myName || sessionStorage.getItem('syncplay_user_name') || 'Listener';
@@ -553,6 +630,7 @@ function connectSocket() {
         if (res && res.success) {
           state.isHost = res.isHost;
           enterRoom(res.room, res.isHost);
+          hideReconnectBanner();
           showToast('🟢 Reconnected to room');
         } else if (res && res.error) {
           showToast('❌ ' + res.error);
@@ -569,7 +647,20 @@ function connectSocket() {
   state.socket.on('disconnect', (reason) => {
     if (reason === 'io client disconnect') return;
     setSyncStatus('error');
-    showToast('⚠️ Disconnected from server. Reconnecting…', 3000);
+    showReconnectBanner('⚠️ Network connection lost. Reconnecting to SyncPlay…');
+  });
+
+  state.socket.io.on('reconnect_attempt', (attempt) => {
+    setSyncStatus('error');
+    showReconnectBanner(`⚠️ Reconnecting to SyncPlay… (attempt ${attempt})`);
+  });
+
+  state.socket.io.on('reconnect_error', () => {
+    showReconnectBanner('⚠️ Network unstable. Retrying connection…');
+  });
+
+  state.socket.io.on('reconnect_failed', () => {
+    showReconnectBanner('❌ Reconnection failed. Please check your internet.');
   });
 
   state.socket.on('user-status-changed', ({ users, newHostName, reconnectedName }) => {
@@ -630,15 +721,15 @@ function connectSocket() {
 
   // Track ready — load audio for everyone
   state.socket.on('track-loaded', ({ trackName, thumbnail, audioUrl, playlist, currentTrackIndex, autoPlay, playAt }) => {
-    opProgressWrap.classList.add('hidden');
     state.roomIsPlaying = !!autoPlay;
     state.offsetHistory = [];
     setPlayingVisuals(!!autoPlay);
+    const trackKey = `${state.roomId}_${currentTrackIndex !== undefined ? currentTrackIndex : 0}_${trackName}`;
     loadAudio(audioUrl, trackName, 0, () => {
       if (autoPlay && playAt) {
         schedulePlay(0, playAt);
       }
-    }, thumbnail);
+    }, thumbnail, trackKey);
     if (playlist) {
       state.playlist = playlist;
       state.currentTrackIndex = currentTrackIndex;
@@ -844,7 +935,7 @@ function updateMediaSession(trackName, thumbnail = null) {
 }
 
 // ─── Load audio ───────────────────────────────────────────────────────────────
-async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, thumbnail = null) {
+async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, thumbnail = null, trackKey = null) {
   clearTimeout(state.sync.playTimeout);
   audioEngine.pause();
   setPlayingVisuals(false);
@@ -872,15 +963,33 @@ async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, t
   startVisualizerLoop();
 
   try {
-    showToast('⏳ Decoding audio buffer…');
-    const dur = await audioEngine.loadTrack(url);
+    opProgressWrap.classList.remove('hidden');
+    opProgressBar.style.width = '0%';
+    opProgressLabel.textContent = 'Buffering audio…';
+
+    const onProgress = (pct, receivedBytes, totalBytes) => {
+      opProgressWrap.classList.remove('hidden');
+      opProgressBar.style.width = pct + '%';
+      const mbReceived = (receivedBytes / (1024 * 1024)).toFixed(1);
+      const mbTotal = (totalBytes / (1024 * 1024)).toFixed(1);
+      opProgressLabel.textContent = `Buffering: ${pct}% (${mbReceived}MB / ${mbTotal}MB)`;
+    };
+
+    const dur = await audioEngine.loadTrack(url, trackKey, onProgress);
+    opProgressLabel.textContent = '⚡ Decoding audio buffer…';
+    opProgressBar.style.width = '100%';
+
     state.duration = dur;
     displayDuration.textContent = fmt(state.duration);
     audioEngine.startPosition = startPos;
     startProgressLoop();
+    setTimeout(() => {
+      opProgressWrap.classList.add('hidden');
+    }, 500);
     showToast(`🎵 "${trackName}" ready`);
     if (onReadyCallback) onReadyCallback();
   } catch (err) {
+    opProgressWrap.classList.add('hidden');
     console.error('[WebAudio Load Error]', err);
     showToast('❌ Failed to load audio: ' + err.message);
   }
@@ -901,8 +1010,9 @@ function startProgressLoop() {
       const nextIdx = state.currentTrackIndex + 1;
       const nextTrack = state.playlist[nextIdx];
       if (nextTrack) {
-        const nextUrl = `/audio/${state.roomId}?idx=${nextIdx}&t=${encodeURIComponent(nextTrack.id || 'track')}`;
-        audioEngine.preloadTrack(nextUrl);
+        const nextTrackKey = `${state.roomId}_${nextIdx}_${nextTrack.trackName}`;
+        const nextUrl = `/audio/${state.roomId}?idx=${nextIdx}&t=${encodeURIComponent(nextTrackKey)}`;
+        audioEngine.preloadTrack(nextUrl, nextTrackKey);
       }
     }
 
@@ -1384,7 +1494,40 @@ function enterRoom(roomData, isHost) {
     const idx = roomData.currentTrackIndex !== undefined ? roomData.currentTrackIndex : 0;
     const currentTrack = (roomData.playlist && roomData.playlist[idx]) || null;
     const trackThumb = roomData.thumbnail || currentTrack?.thumbnail || null;
-    const audioUrl = `/audio/${roomData.id}?idx=${idx}&v=${Date.now()}`;
+    const trackKey = `${roomData.id}_${idx}_${roomData.trackName}`;
+    const audioUrl = `/audio/${roomData.id}?idx=${idx}&t=${encodeURIComponent(trackKey)}`;
+
+    // Seamless Silent Reconnection: if current track buffer is ALREADY active in memory, do not pause or reload
+    if (audioEngine.currentTrackKey === trackKey && audioEngine.buffer) {
+      console.log('[enterRoom] Silent seamless reconnect: audio buffer active in memory');
+      displayTrack.textContent = roomData.trackName || 'Unknown Track';
+      displayDuration.textContent = fmt(audioEngine.duration);
+      playerCard.classList.remove('hidden');
+      controlsBar.classList.remove('hidden');
+      setPlayingVisuals(wasPlaying);
+
+      if (wasPlaying) {
+        const decodeElapsedSec = (Date.now() + state.clockOffset - joinedAt) / 1000;
+        const livePos = Math.max(0, Math.min(audioEngine.duration - 0.1, snapshotPos + decodeElapsedSec));
+        const curLocalTime = audioEngine.getCurrentTime();
+        const drift = Math.abs(curLocalTime - livePos);
+
+        // Gently realign only if stopped or drifted significantly (> 0.4s)
+        if (!audioEngine.isPlaying || drift > 0.4) {
+          const livePlayAt = Date.now() + state.clockOffset + 150;
+          schedulePlay(livePos, livePlayAt);
+          console.log(`[Reconnection Align] local=${curLocalTime.toFixed(2)}s livePos=${livePos.toFixed(2)}s drift=${drift.toFixed(2)}s`);
+        } else {
+          console.log(`[Reconnection] Micro-drift is only ${drift.toFixed(3)}s, keeping playback undisturbed`);
+        }
+      } else {
+        if (audioEngine.isPlaying) {
+          audioEngine.pause();
+          setPlayingVisuals(false);
+        }
+      }
+      return;
+    }
 
     loadAudio(audioUrl, roomData.trackName, 0, () => {
       if (wasPlaying) {
@@ -1395,7 +1538,7 @@ function enterRoom(roomData, isHost) {
         schedulePlay(livePos, livePlayAt);
         console.log(`[LateJoin] snapshotPos=${snapshotPos.toFixed(2)}s decodeElapsed=${decodeElapsedSec.toFixed(2)}s livePos=${livePos.toFixed(2)}s`);
       }
-    }, trackThumb);
+    }, trackThumb, trackKey);
   } else if (roomData.downloading) {
     hostPrompt.classList.add('hidden');
     opProgressWrap.classList.remove('hidden');
