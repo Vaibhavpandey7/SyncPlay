@@ -49,9 +49,11 @@
           <div class="card-icon">✦</div>
           <h2>Create a Room</h2>
           <p>Start a new session and share the code with friends.</p>
-          <div class="input-group has-action">
-            <input id="input-create-name" type="text" placeholder="Your name (e.g. Neon Panda)" maxlength="20" autocomplete="off" />
-            <button type="button" id="btn-rand-create-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
+          <div class="input-group">
+            <div class="input-action-wrap">
+              <input id="input-create-name" type="text" placeholder="Your name (e.g. Neon Panda)" maxlength="20" autocomplete="off" />
+              <button type="button" id="btn-rand-create-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
+            </div>
           </div>
           <button id="btn-create" class="btn btn-primary">
             <span>Create Room</span>
@@ -65,9 +67,11 @@
           <div class="card-icon">⊕</div>
           <h2>Join a Room</h2>
           <p>Enter a code to join an existing listening session.</p>
-          <div class="input-group has-action">
-            <input id="input-join-name" type="text" placeholder="Your name (e.g. Cosmic Fox)" maxlength="20" autocomplete="off" />
-            <button type="button" id="btn-rand-join-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
+          <div class="input-group">
+            <div class="input-action-wrap">
+              <input id="input-join-name" type="text" placeholder="Your name (e.g. Cosmic Fox)" maxlength="20" autocomplete="off" />
+              <button type="button" id="btn-rand-join-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
+            </div>
             <input id="input-room-code" type="text" placeholder="Room code (e.g. AB12CD)" maxlength="6" autocomplete="off" class="code-input" />
           </div>
           <button id="btn-join" class="btn btn-secondary">
