@@ -687,7 +687,13 @@ app.post('/download/:roomId', async (req, res) => {
   if (!room) return res.status(404).json({ error: 'Room not found' });
   if (room.downloading) return res.status(409).json({ error: 'Already downloading' });
 
-  const { url } = req.body;
+  const { url, userName: bodyUserName } = req.body || {};
+  let headerUserName = req.headers['x-user-name'];
+  if (headerUserName) {
+    try { headerUserName = decodeURIComponent(headerUserName); } catch (_) {}
+  }
+  const userName = bodyUserName || headerUserName || 'Host';
+
   const videoId = extractVideoId(url || '');
   if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL or Video ID' });
 
@@ -702,7 +708,7 @@ app.post('/download/:roomId', async (req, res) => {
     console.log(`[Cache HIT] ${videoId} → ${cachedFile}`);
     io.to(roomId).emit('download-progress', { percent: 100, status: 'done' });
     const trackName = await getVideoTitle(videoId);
-    notifyTrackAdded(roomId, room, trackName, cachedFile, req.headers['x-user-name'] || 'Host', thumbnail);
+    notifyTrackAdded(roomId, room, trackName, cachedFile, userName, thumbnail);
     return;
   }
 
@@ -716,7 +722,7 @@ app.post('/download/:roomId', async (req, res) => {
 
     // Fetch clean title if yt-dlp didn't provide one
     let trackName = title !== videoId ? title : videoId;
-    notifyTrackAdded(roomId, room, trackName, filePath, req.headers['x-user-name'] || 'Host', thumbnail);
+    notifyTrackAdded(roomId, room, trackName, filePath, userName, thumbnail);
     room.downloading = false;
     console.log(`[Room ${roomId}] Track loaded: ${trackName}`);
   } catch (err) {
@@ -735,8 +741,11 @@ app.post('/upload/:roomId', (req, res) => {
   res.setTimeout(300000);
 
   const room = rooms.get(roomId);
-  const userToken = req.headers['x-user-token'];
-  const userName = req.headers['x-user-name'] || 'Host';
+  const userToken = req.headers['x-user-token'] || req.query.token;
+  let rawName = req.headers['x-user-name'] || req.query.userName || 'Host';
+  if (rawName) {
+    try { rawName = decodeURIComponent(rawName); } catch (_) {}
+  }
 
   // Mark user as actively uploading so they are protected from disconnect / host-transfer
   let uploadingUser = null;
@@ -744,7 +753,7 @@ app.post('/upload/:roomId', (req, res) => {
     if (userToken) uploadingUser = room.users.get(userToken);
     if (!uploadingUser) {
       for (const u of room.users.values()) {
-        if (u.name === userName || (u.isHost && !uploadingUser)) uploadingUser = u;
+        if (u.name === rawName || (u.isHost && !uploadingUser)) uploadingUser = u;
       }
     }
     if (uploadingUser) {
@@ -773,8 +782,9 @@ app.post('/upload/:roomId', (req, res) => {
     if (!room) return res.status(404).json({ error: 'Room not found' });
     if (!req.file) return res.status(400).json({ error: 'No valid audio file received' });
 
+    const finalUserName = (req.body && req.body.userName) || rawName || 'Host';
     const trackName = req.file.originalname.replace(/\.[^/.]+$/, '');
-    notifyTrackAdded(roomId, room, trackName, req.file.path, userName);
+    notifyTrackAdded(roomId, room, trackName, req.file.path, finalUserName);
 
     console.log(`[Room ${roomId}] File uploaded: ${trackName}`);
     res.json({ success: true, trackName });

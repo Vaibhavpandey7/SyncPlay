@@ -1285,10 +1285,12 @@ async function submitYtUrl() {
     const res = await fetch(`/download/${state.roomId}`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'x-user-name': state.myName
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({
+        url,
+        userName: state.myName || 'Host'
+      })
     });
 
     let data = null;
@@ -1310,7 +1312,7 @@ async function submitYtUrl() {
     if (!navigator.onLine) {
       showErr(ytError, 'You are offline. Please check your internet connection.');
     } else {
-      showErr(ytError, 'Network error. Could not connect to SyncPlay server.');
+      showErr(ytError, err.message || 'Network error. Could not connect to SyncPlay server.');
     }
     opProgressWrap.classList.add('hidden');
   } finally {
@@ -1422,12 +1424,20 @@ function uploadFile(file) {
 
   const fd = new FormData();
   fd.append('audio', file);
+  fd.append('userName', state.myName || 'Host');
+  fd.append('userToken', getUserToken() || '');
+
+  const queryParams = new URLSearchParams({
+    token: getUserToken() || '',
+    userName: state.myName || 'Host'
+  }).toString();
 
   const xhr = new XMLHttpRequest();
   xhr.timeout = 300000; // 5 minute timeout for mobile uploads
-  xhr.open('POST', `/upload/${state.roomId}`);
-  xhr.setRequestHeader('x-user-name', state.myName);
-  xhr.setRequestHeader('x-user-token', getUserToken());
+  xhr.open('POST', `/upload/${state.roomId}?${queryParams}`);
+  try {
+    xhr.setRequestHeader('x-user-token', encodeURIComponent(getUserToken() || ''));
+  } catch (_) {}
 
   // Keep WebSocket connection active with heartbeats during heavy file upload
   const keepAliveTimer = setInterval(() => {
