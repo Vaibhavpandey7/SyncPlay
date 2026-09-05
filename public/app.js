@@ -1586,8 +1586,20 @@ function renderPlaylist(playlist, currentIndex) {
 
 // ─── Landing ──────────────────────────────────────────────────────────────────
 
+function sanitizeUserName(name, fallback = 'Guest') {
+  if (!name || typeof name !== 'string') return fallback;
+  // Remove emojis and non-standard control characters, keep clean readable text
+  const clean = name.replace(/[\u{1F300}-\u{1FAFF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{2600}-\u{27BF}]/gu, '')
+                    .replace(/[^\w\s.-]/g, '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .slice(0, 20);
+  return clean || fallback;
+}
+
 btnCreate.addEventListener('click', async () => {
-  const name = inputCreateName.value.trim() || 'Host';
+  const name = sanitizeUserName(inputCreateName.value, 'Host');
+  inputCreateName.value = name;
   if (!state.socket || !state.socket.connected) {
     connectSocket();
     if (!state.clockOffset) await syncClock();
@@ -1600,7 +1612,8 @@ btnCreate.addEventListener('click', async () => {
 });
 
 btnJoin.addEventListener('click', async () => {
-  const name = inputJoinName.value.trim() || 'Guest';
+  const name = sanitizeUserName(inputJoinName.value, 'Guest');
+  inputJoinName.value = name;
   const code = inputRoomCode.value.trim().toUpperCase();
   if (!code) { showErr(landingError, 'Please enter a room code.'); return; }
   if (!state.socket || !state.socket.connected) {
@@ -1615,6 +1628,12 @@ btnJoin.addEventListener('click', async () => {
 });
 
 inputRoomCode.addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,''); });
+[inputCreateName, inputJoinName].forEach(el => {
+  el.addEventListener('input', e => {
+    // Strip emojis in real-time
+    e.target.value = e.target.value.replace(/[\u{1F300}-\u{1FAFF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{2600}-\u{27BF}]/gu, '');
+  });
+});
 [inputCreateName, inputRoomCode, inputJoinName].forEach((el, i) => {
   el.addEventListener('keydown', e => { if (e.key === 'Enter') (i === 0 ? btnCreate : btnJoin).click(); });
 });
@@ -1961,9 +1980,9 @@ btnQrCopyLink?.addEventListener('click', () => {
 
 // ─── Fun Music Persona Generator ──────────────────────────────────────────────
 const FUN_PERSONAS = [
-  '🎧 Neon Panda', '⚡ Cosmic Fox', '🎵 Chill Dolphin', '🎷 Retro Wolf',
-  '🎸 Star Beats', '🎹 Lunar Echo', '🥁 Groove Tiger', '🎺 Velvet Vibe',
-  '📻 Cyber Nomad', '🎤 Velvet Sonic', '🎧 Echo Wave', '🔥 Bass Maverick'
+  'Neon Panda', 'Cosmic Fox', 'Chill Dolphin', 'Retro Wolf',
+  'Star Beats', 'Lunar Echo', 'Groove Tiger', 'Velvet Vibe',
+  'Cyber Nomad', 'Velvet Sonic', 'Echo Wave', 'Bass Maverick'
 ];
 
 function getRandomPersona() {

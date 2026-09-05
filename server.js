@@ -64,8 +64,19 @@ const upload = multer({
 // ─── Room state ───────────────────────────────────────────────────────────────
 const rooms = new Map();
 
+function sanitizeUserName(name, fallback = 'Guest') {
+  if (!name || typeof name !== 'string') return fallback;
+  const clean = name.replace(/[\u{1F300}-\u{1FAFF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{2600}-\u{27BF}]/gu, '')
+                    .replace(/[^\w\s.-]/g, '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .slice(0, 20);
+  return clean || fallback;
+}
+
 function makeRoom(id, hostSocketId, hostName, hostToken) {
   const token = hostToken || hostSocketId;
+  const cleanHostName = sanitizeUserName(hostName, 'Host');
   return {
     id,
     creatorToken: token,
@@ -80,7 +91,7 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
     positionHistory: [],   // Server-side rolling 5-sample buffer for jitter-free room sync
     hostHardwareLatency: 0, // Hardware audio output latency of Host device
     downloading: false,
-    users: new Map([[token, { name: hostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, isUploading: false, disconnectTimer: null }]])
+    users: new Map([[token, { name: cleanHostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, isUploading: false, disconnectTimer: null }]])
   };
 }
 
@@ -894,12 +905,13 @@ io.on('connection', socket => {
   socket.on('create-room', ({ userName, userToken }, cb) => {
     const id = genId();
     const token = userToken || socket.id;
-    const room = makeRoom(id, socket.id, userName || 'Host', token);
+    const cleanName = sanitizeUserName(userName, 'Host');
+    const room = makeRoom(id, socket.id, cleanName, token);
     rooms.set(id, room);
     socket.join(id);
     socket.data.roomId = id;
     socket.data.userToken = token;
-    console.log(`[Room ${id}] Created by ${userName} (token: ${token})`);
+    console.log(`[Room ${id}] Created by ${cleanName} (token: ${token})`);
     if (typeof cb === 'function') {
       cb({ success: true, isHost: true, room: publicRoom(room) });
     }
@@ -913,6 +925,7 @@ io.on('connection', socket => {
     if (!room) return typeof cb === 'function' && cb({ error: 'Room not found' });
 
     const token = userToken || socket.id;
+    const cleanName = sanitizeUserName(userName, 'Guest');
     let user = room.users.get(token);
 
     // 1. If not found by map key, look up by stored userToken
@@ -930,9 +943,9 @@ io.on('connection', socket => {
     }
 
     // 2. If still not found, check if there is an offline user with the same name to reclaim
-    if (!user && userName) {
+    if (!user && cleanName) {
       for (const [k, u] of room.users.entries()) {
-        if (u.offline && u.name.trim().toLowerCase() === userName.trim().toLowerCase()) {
+        if (u.offline && u.name.trim().toLowerCase() === cleanName.toLowerCase()) {
           user = u;
           room.users.delete(k);
           room.users.set(token, user);
@@ -951,7 +964,7 @@ io.on('connection', socket => {
       user.userToken = token;
       user.offline = false;
       user.isUploading = false;
-      if (userName) user.name = userName;
+      if (cleanName) user.name = cleanName;
 
       // If user was creator or host, or only online user, restore host status!
       if (token === room.creatorToken || token === room.hostToken || user.isHost || [...room.users.values()].filter(u => !u.offline).length <= 1) {
@@ -978,17 +991,17 @@ io.on('connection', socket => {
       // New user joining
       if (room.users.size >= MAX_ROOM) return typeof cb === 'function' && cb({ error: 'Room is full (max 4)' });
 
-      user = { name: userName || 'Guest', isHost: false, socketId: socket.id, userToken: token, offline: false, disconnectTimer: null };
+      user = { name: cleanName, isHost: false, socketId: socket.id, userToken: token, offline: false, disconnectTimer: null };
       room.users.set(token, user);
       socket.join(id);
       socket.data.roomId = id;
       socket.data.userToken = token;
 
       socket.to(id).emit('user-joined', {
-        userId: socket.id, name: userName,
+        userId: socket.id, name: cleanName,
         users: publicRoom(room).users
       });
-      console.log(`[Room ${id}] ${userName} joined`);
+      console.log(`[Room ${id}] ${cleanName} joined`);
     }
 
     // Compute exact synced position for the joiner
