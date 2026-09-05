@@ -49,8 +49,9 @@
           <div class="card-icon">✦</div>
           <h2>Create a Room</h2>
           <p>Start a new session and share the code with friends.</p>
-          <div class="input-group">
-            <input id="input-create-name" type="text" placeholder="Your name" maxlength="20" autocomplete="off" />
+          <div class="input-group has-action">
+            <input id="input-create-name" type="text" placeholder="Your name (e.g. Neon Panda)" maxlength="20" autocomplete="off" />
+            <button type="button" id="btn-rand-create-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
           </div>
           <button id="btn-create" class="btn btn-primary">
             <span>Create Room</span>
@@ -64,12 +65,13 @@
           <div class="card-icon">⊕</div>
           <h2>Join a Room</h2>
           <p>Enter a code to join an existing listening session.</p>
-          <div class="input-group">
-            <input id="input-join-name" type="text" placeholder="Your name" maxlength="20" autocomplete="off" />
+          <div class="input-group has-action">
+            <input id="input-join-name" type="text" placeholder="Your name (e.g. Cosmic Fox)" maxlength="20" autocomplete="off" />
+            <button type="button" id="btn-rand-join-name" class="btn-input-action" title="Randomize Persona" aria-label="Randomize Persona">🎲</button>
             <input id="input-room-code" type="text" placeholder="Room code (e.g. AB12CD)" maxlength="6" autocomplete="off" class="code-input" />
           </div>
           <button id="btn-join" class="btn btn-secondary">
-            <span>Join Room</span>
+            <span id="btn-join-text">Join Room</span>
             <svg class="btn-arrow" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
           </button>
         </div>
@@ -88,6 +90,7 @@
 
   <!-- ═══════════ ROOM ═══════════ -->
   <div id="page-room" class="page">
+    <div id="ambient-aura" class="ambient-aura" aria-hidden="true"></div>
     <div class="room-bg">
       <div class="orb orb-1"></div>
       <div class="orb orb-2"></div>
@@ -110,6 +113,9 @@
         </button>
         <button id="btn-share-room" class="btn-icon" title="Share Invite Link" aria-label="Share Room Invite Link">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
+        </button>
+        <button id="btn-party-qr" class="btn-icon" title="Party QR Code" aria-label="Show Party QR Code">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm13-2h3v2h-3v-2zm-5 0h2v3h-2v-3zm2 3h3v2h-3v-2zm3 2h3v4h-3v-4zm-5 2h2v2h-2v-2zm2-2h3v2h-3v-2zm-2 2h-2v2h2v-2z"/></svg>
         </button>
       </div>
       <button id="btn-leave" class="btn-leave" aria-label="Leave Room">Leave</button>
@@ -138,12 +144,13 @@
           <!-- YouTube tab content -->
           <div id="panel-yt" class="tab-content">
             <div class="url-row">
-              <input id="input-yt-url" type="text" placeholder="https://youtube.com/watch?v=… or video ID" autocomplete="off" />
+              <input id="input-yt-url" type="text" placeholder="Search song title (e.g. Zara Sa) or paste YouTube URL" autocomplete="off" />
               <button id="btn-load-yt" class="btn btn-primary btn-sm">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9l-7 7-7-7"/></svg>
                 Load
               </button>
             </div>
+            <div id="yt-search-results" class="yt-search-results hidden"></div>
             <p id="yt-error" class="error-msg hidden"></p>
           </div>
 
@@ -182,6 +189,9 @@
 
         <!-- Player card -->
         <div id="player-card" class="player-card hidden">
+          <!-- Real-time floating reaction stage -->
+          <div id="reaction-stage" class="reaction-stage" aria-hidden="true"></div>
+
           <div class="album-art" id="album-art-wrap">
             <img id="album-art-img" class="album-art-img hidden" alt="Song Artwork" />
             <div class="art-bars" id="art-bars">
@@ -219,11 +229,21 @@
 
           <div class="scrub-wrap">
             <span id="display-current" class="time-label">0:00</span>
-            <div class="scrub-track" id="scrub-track" role="slider" aria-label="Playback scrub track" tabindex="0">
-              <div class="scrub-fill"  id="scrub-fill"></div>
-              <div class="scrub-knob"  id="scrub-knob"></div>
+            <div id="scrub-track" class="scrub-track" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+              <div id="scrub-fill" class="scrub-fill" style="width:0%"></div>
+              <div class="scrub-knob" id="scrub-knob"></div>
             </div>
             <span id="display-duration" class="time-label">0:00</span>
+          </div>
+
+          <!-- Live emoji vibe reactions -->
+          <div id="reaction-bar" class="reaction-bar">
+            <span class="reaction-label">Vibe:</span>
+            <button class="reaction-btn" data-emoji="❤️" title="Love" aria-label="React Love">❤️</button>
+            <button class="reaction-btn" data-emoji="🔥" title="Fire" aria-label="React Fire">🔥</button>
+            <button class="reaction-btn" data-emoji="🕺" title="Dance" aria-label="React Dance">🕺</button>
+            <button class="reaction-btn" data-emoji="😭" title="Emotional" aria-label="React Emotional">😭</button>
+            <button class="reaction-btn" data-emoji="⚡" title="Hyped" aria-label="React Hyped">⚡</button>
           </div>
 
           <div id="ctrl-badge" class="ctrl-badge"></div>
@@ -271,6 +291,21 @@
       <span class="unlock-sub">Your mobile browser requires a tap to start playing</span>
     </div>
     <button id="btn-unlock-audio" class="btn-unlock">Tap to Listen</button>
+  </div>
+
+  <!-- Party QR Modal -->
+  <div id="qr-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title">
+    <div class="modal-card">
+      <button id="btn-close-qr" class="modal-close" aria-label="Close modal">&times;</button>
+      <div class="modal-icon">📱</div>
+      <h3 id="qr-modal-title" class="modal-title">Party QR Code</h3>
+      <p class="modal-sub">Scan with your phone camera to instantly sync and turn your phone into a synchronized speaker</p>
+      <div class="qr-code-wrapper">
+        <canvas id="qr-canvas" width="220" height="220"></canvas>
+      </div>
+      <div class="qr-room-badge">Room Code: <strong id="qr-room-code">------</strong></div>
+      <button id="btn-qr-copy-link" class="btn btn-primary btn-modal">Copy Invite Link</button>
+    </div>
   </div>
 
   <div id="toast" class="toast hidden"></div>

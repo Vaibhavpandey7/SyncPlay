@@ -459,3 +459,361 @@ ul{list-style:none}
   to { transform: rotate(360deg); }
 }
 
+/* ═══════════════════════════════════════════════════════════
+   UI/UX UPGRADES: AURA, REACTIONS, SEARCH, QR MODAL
+═══════════════════════════════════════════════════════════ */
+
+/* ─── Ambient Dynamic Aura Layer ─── */
+.ambient-aura {
+  position: absolute;
+  inset: -10% -10% auto -10%;
+  height: 90vh;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 30%, var(--aura-glow, rgba(167, 139, 250, 0.24)) 0%, transparent 68%);
+  filter: blur(85px);
+  opacity: 0.85;
+  transition: background 1.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 1.4s ease;
+  z-index: 0;
+}
+
+/* ─── Input Group with Action Button ─── */
+.input-group.has-action {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-group.has-action input {
+  padding-right: 48px;
+}
+
+.btn-input-action {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  font-size: 1.15rem;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s ease;
+  z-index: 2;
+}
+
+.btn-input-action:hover {
+  transform: translateY(-50%) scale(1.18) rotate(15deg);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.btn-input-action:active {
+  transform: translateY(-50%) scale(0.9);
+}
+
+/* ─── YouTube Instant Search Dropdown ─── */
+.yt-search-results {
+  margin-top: 10px;
+  background: rgba(18, 18, 30, 0.96);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  padding: 8px;
+  max-height: 290px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6), 0 0 25px rgba(124, 58, 237, 0.2);
+  animation: search-results-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 60;
+}
+
+.yt-search-results.hidden {
+  display: none !important;
+}
+
+@keyframes search-results-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.search-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+  cursor: pointer;
+}
+
+.search-item:hover {
+  background: rgba(124, 58, 237, 0.18);
+  border-color: rgba(167, 139, 250, 0.35);
+  transform: translateX(4px);
+}
+
+.search-thumb {
+  width: 64px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+  background: #111;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.search-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.search-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-dur {
+  font-size: 0.74rem;
+  color: #94a3b8;
+}
+
+.btn-add-search {
+  background: linear-gradient(135deg, #7c3aed, #38bdf8);
+  border: none;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.15s ease, filter 0.15s ease;
+  flex-shrink: 0;
+}
+
+.btn-add-search:hover {
+  transform: scale(1.06);
+  filter: brightness(1.15);
+}
+
+/* ─── Real-Time Floating Emoji Reactions ─── */
+.reaction-stage {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  border-radius: 24px;
+  z-index: 25;
+}
+
+.floating-emoji {
+  position: absolute;
+  bottom: 16px;
+  font-size: 2.2rem;
+  user-select: none;
+  pointer-events: none;
+  animation: float-emoji-rise 2.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.6));
+}
+
+@keyframes float-emoji-rise {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4) rotate(0deg);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(var(--dx1, 0px), -45px) scale(1.3) rotate(var(--rot1, -8deg));
+  }
+  75% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx2, 20px), -260px) scale(0.85) rotate(var(--rot2, 15deg));
+  }
+}
+
+.reaction-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 6px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  width: fit-content;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.reaction-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+  margin-right: 4px;
+}
+
+.reaction-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  cursor: pointer;
+  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s ease, box-shadow 0.2s ease;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.reaction-btn:hover {
+  transform: scale(1.28) translateY(-4px);
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 6px 18px rgba(124, 58, 237, 0.4);
+}
+
+.reaction-btn:active {
+  transform: scale(0.9);
+}
+
+/* ─── Party QR Code Modal ─── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 7, 12, 0.82);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10005;
+  padding: 20px;
+  animation: modal-fade-in 0.25s ease;
+}
+
+.modal-overlay.hidden {
+  display: none !important;
+}
+
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-card {
+  position: relative;
+  background: linear-gradient(145deg, rgba(28, 28, 46, 0.96), rgba(16, 16, 28, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 26px;
+  padding: 32px 26px;
+  max-width: 400px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 28px 64px rgba(0, 0, 0, 0.75), 0 0 40px rgba(124, 58, 237, 0.3);
+  animation: modal-card-pop 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modal-card-pop {
+  from { opacity: 0; transform: scale(0.9) translateY(16px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 18px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #94a3b8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+.modal-icon {
+  font-size: 2.4rem;
+  margin-bottom: 8px;
+}
+
+.modal-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: #ffffff;
+  margin-bottom: 6px;
+}
+
+.modal-sub {
+  font-size: 0.88rem;
+  color: #94a3b8;
+  line-height: 1.45;
+  margin-bottom: 22px;
+}
+
+.qr-code-wrapper {
+  background: #ffffff;
+  padding: 14px;
+  border-radius: 18px;
+  display: inline-block;
+  margin-bottom: 18px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+.qr-code-wrapper canvas {
+  display: block;
+  border-radius: 6px;
+}
+
+.qr-room-badge {
+  font-size: 0.94rem;
+  color: #cbd5e1;
+  margin-bottom: 20px;
+}
+
+.qr-room-badge strong {
+  color: #a78bfa;
+  font-family: monospace;
+  font-size: 1.15rem;
+  letter-spacing: 0.12em;
+}
+
+.btn-modal {
+  width: 100%;
+  padding: 12px 20px;
+  font-size: 0.94rem;
+}
+
+

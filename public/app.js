@@ -461,6 +461,22 @@ const displayCurrent  = $('display-current');
 const displayDuration = $('display-duration');
 const ctrlBadge       = $('ctrl-badge');
 
+// New UI/UX elements
+const ambientAura        = $('ambient-aura');
+const reactionStage      = $('reaction-stage');
+const reactionBar        = $('reaction-bar');
+const reactionBtns       = document.querySelectorAll('.reaction-btn');
+const ytSearchResults    = $('yt-search-results');
+const btnPartyQr         = $('btn-party-qr');
+const qrModal            = $('qr-modal');
+const btnCloseQr         = $('btn-close-qr');
+const qrCanvas           = $('qr-canvas');
+const qrRoomCode         = $('qr-room-code');
+const btnQrCopyLink      = $('btn-qr-copy-link');
+const btnRandCreateName  = $('btn-rand-create-name');
+const btnRandJoinName    = $('btn-rand-join-name');
+const btnJoinText        = $('btn-join-text');
+
 // Users & Playlist
 const userCount       = $('user-count');
 const usersList       = $('users-list');
@@ -648,6 +664,13 @@ function connectSocket() {
     if (reason === 'io client disconnect') return;
     setSyncStatus('error');
     showReconnectBanner('⚠️ Network connection lost. Reconnecting to SyncPlay…');
+  });
+
+  // Live floating emoji reaction burst from room listeners
+  state.socket.on('reaction', ({ emoji, userName, userId }) => {
+    if (userId !== state.socket?.id) {
+      spawnFloatingEmoji(emoji);
+    }
   });
 
   state.socket.io.on('reconnect_attempt', (attempt) => {
@@ -953,9 +976,11 @@ async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, t
       albumArtImg.src = thumbnail;
       albumArtImg.classList.remove('hidden');
       albumArtWrap?.classList.add('has-thumb');
+      updateAmbientAura(albumArtImg);
     } else {
       albumArtImg.classList.add('hidden');
       albumArtWrap?.classList.remove('has-thumb');
+      updateAmbientAura(null);
     }
   }
 
@@ -1209,14 +1234,41 @@ btnLoadYt.addEventListener('click', submitYtUrl);
 inputYtUrl.addEventListener('keydown', e => { if (e.key === 'Enter') submitYtUrl(); });
 
 async function submitYtUrl() {
-  const url = inputYtUrl.value.trim();
-  if (!url) { showErr(ytError, 'Please enter a YouTube URL or video ID.'); return; }
+  let url = inputYtUrl.value.trim();
+  if (!url) { showErr(ytError, 'Please enter a song title or YouTube link.'); return; }
   ytError.classList.add('hidden');
+  ytSearchResults?.classList.add('hidden');
+
+  // If input is NOT a direct URL and NOT an 11-char ID, automatically search YouTube and select top match
+  const isDirect = url.startsWith('http://') || url.startsWith('https://') || /^[a-zA-Z0-9_-]{11}$/.test(url);
+  if (!isDirect) {
+    opProgressWrap.classList.remove('hidden');
+    opProgressBar.style.width = '10%';
+    opProgressLabel.textContent = `Searching YouTube for "${url}"…`;
+    btnLoadYt.disabled = true;
+
+    try {
+      const searchRes = await fetch(`/api/search?q=${encodeURIComponent(url)}`);
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        if (searchData.results && searchData.results.length > 0) {
+          const topMatch = searchData.results[0];
+          url = topMatch.url;
+          showToast(`🎵 Found: "${topMatch.title}"`);
+        } else {
+          showErr(ytError, `No songs found matching "${url}".`);
+          opProgressWrap.classList.add('hidden');
+          btnLoadYt.disabled = false;
+          return;
+        }
+      }
+    } catch (_) {}
+  }
 
   // Show loading state immediately
   opProgressWrap.classList.remove('hidden');
-  opProgressBar.style.width = '5%';
-  opProgressLabel.textContent = 'Checking cache…';
+  opProgressBar.style.width = '15%';
+  opProgressLabel.textContent = 'Connecting to audio stream…';
   btnLoadYt.disabled = true;
 
   try {
@@ -1240,8 +1292,77 @@ async function submitYtUrl() {
   } finally {
     btnLoadYt.disabled = false;
     inputYtUrl.value = '';
+    ytSearchResults?.classList.add('hidden');
   }
 }
+
+// ─── Instant YouTube Search & Autocomplete ─────────────────────────────────────
+let searchDebounceTimer = null;
+
+['input', 'keyup'].forEach(evt => {
+  inputYtUrl?.addEventListener(evt, e => {
+    if (e.key === 'Enter') return;
+    clearTimeout(searchDebounceTimer);
+    const val = (inputYtUrl.value || '').trim();
+
+    // If input looks like a URL or video ID, hide search suggestions
+    if (!val || val.startsWith('http://') || val.startsWith('https://') || /^[a-zA-Z0-9_-]{11}$/.test(val)) {
+      ytSearchResults?.classList.add('hidden');
+      return;
+    }
+
+    if (val.length < 2) {
+      ytSearchResults?.classList.add('hidden');
+      return;
+    }
+
+    searchDebounceTimer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(val)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || !data.results || data.results.length === 0) {
+          ytSearchResults?.classList.add('hidden');
+          return;
+        }
+        renderSearchResults(data.results);
+      } catch (_) {}
+    }, 300);
+  });
+});
+
+function renderSearchResults(results) {
+  if (!ytSearchResults) return;
+  ytSearchResults.innerHTML = '';
+  results.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'search-item';
+    row.innerHTML = `
+      <img src="${item.thumbnail}" class="search-thumb" alt="" loading="lazy" />
+      <div class="search-info">
+        <span class="search-title">${escapeHtml(item.title)}</span>
+        <span class="search-dur">${item.duration ? `⏱ ${item.duration}` : 'YouTube Video'}</span>
+      </div>
+      <button class="btn-add-search" type="button">+ Queue</button>
+    `;
+
+    row.addEventListener('click', () => {
+      inputYtUrl.value = item.url;
+      ytSearchResults.classList.add('hidden');
+      btnLoadYt.click();
+    });
+
+    ytSearchResults.appendChild(row);
+  });
+  ytSearchResults.classList.remove('hidden');
+}
+
+// Close search dropdown on outside click
+document.addEventListener('click', e => {
+  if (ytSearchResults && panelYt && !panelYt.contains(e.target)) {
+    ytSearchResults.classList.add('hidden');
+  }
+});
 
 
 // ─── File Upload ──────────────────────────────────────────────────────────────
@@ -1661,6 +1782,169 @@ window.addEventListener('keydown', e => {
   }
 });
 
+// ─── Dynamic Ambient Aura (Color Extraction) ──────────────────────────────────
+function updateAmbientAura(imageElement) {
+  if (!imageElement || imageElement.classList.contains('hidden') || !imageElement.src) {
+    document.documentElement.style.setProperty('--aura-glow', 'rgba(167, 139, 250, 0.25)');
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const img = new Image();
+  img.crossOrigin = 'Anonymous';
+  img.onload = () => {
+    try {
+      ctx.drawImage(img, 0, 0, 16, 16);
+      const imgData = ctx.getImageData(0, 0, 16, 16).data;
+      let r = 0, g = 0, b = 0, count = 0;
+
+      for (let i = 0; i < imgData.length; i += 4) {
+        const red = imgData[i];
+        const green = imgData[i + 1];
+        const blue = imgData[i + 2];
+        const brightness = (red + green + blue) / 3;
+        if (brightness > 25 && brightness < 235) {
+          r += red;
+          g += green;
+          b += blue;
+          count++;
+        }
+      }
+
+      if (count > 0) {
+        r = Math.round(r / count);
+        g = Math.round(g / count);
+        b = Math.round(b / count);
+        const max = Math.max(r, g, b);
+        if (max < 160) {
+          const factor = 160 / Math.max(max, 1);
+          r = Math.min(255, Math.round(r * factor));
+          g = Math.min(255, Math.round(g * factor));
+          b = Math.min(255, Math.round(b * factor));
+        }
+        document.documentElement.style.setProperty('--aura-glow', `rgba(${r}, ${g}, ${b}, 0.38)`);
+      }
+    } catch (_) {}
+  };
+  img.src = imageElement.src;
+}
+
+// ─── Real-Time Floating Emoji Reactions ───────────────────────────────────────
+function spawnFloatingEmoji(emoji) {
+  if (!reactionStage) return;
+  const el = document.createElement('div');
+  el.className = 'floating-emoji';
+  el.textContent = emoji;
+
+  const leftPct = 15 + Math.random() * 70;
+  const dx1 = (Math.random() - 0.5) * 50;
+  const dx2 = (Math.random() - 0.5) * 90;
+  const rot1 = (Math.random() - 0.5) * 25;
+  const rot2 = (Math.random() - 0.5) * 45;
+
+  el.style.left = `${leftPct}%`;
+  el.style.setProperty('--dx1', `${dx1}px`);
+  el.style.setProperty('--dx2', `${dx2}px`);
+  el.style.setProperty('--rot1', `${rot1}deg`);
+  el.style.setProperty('--rot2', `${rot2}deg`);
+
+  reactionStage.appendChild(el);
+  setTimeout(() => el.remove(), 2300);
+}
+
+reactionBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const emoji = btn.dataset.emoji;
+    if (!emoji || !state.socket) return;
+    spawnFloatingEmoji(emoji);
+    if (navigator.vibrate) {
+      try { navigator.vibrate(15); } catch (_) {}
+    }
+    state.socket.emit('send-reaction', {
+      roomId: state.roomId,
+      emoji,
+      userName: state.myName
+    });
+  });
+});
+
+// ─── Party QR Code Modal ──────────────────────────────────────────────────────
+function renderQrCode(url) {
+  if (!qrCanvas) return;
+  const ctx = qrCanvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 220, 220);
+
+  const qrImg = new Image();
+  qrImg.crossOrigin = 'Anonymous';
+  qrImg.onload = () => {
+    ctx.drawImage(qrImg, 0, 0, 220, 220);
+  };
+  qrImg.onerror = () => {
+    ctx.fillStyle = '#1e1b4b';
+    ctx.fillRect(10, 10, 200, 200);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 16px Outfit, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('SCAN INVITE', 110, 90);
+    ctx.font = 'bold 24px monospace';
+    ctx.fillText(state.roomId || '', 110, 130);
+  };
+  qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=1&data=${encodeURIComponent(url)}`;
+}
+
+btnPartyQr?.addEventListener('click', () => {
+  if (!state.roomId) return;
+  const shareUrl = `${window.location.origin}/?room=${state.roomId}`;
+  if (qrRoomCode) qrRoomCode.textContent = state.roomId;
+  renderQrCode(shareUrl);
+  qrModal?.classList.remove('hidden');
+});
+
+btnCloseQr?.addEventListener('click', () => {
+  qrModal?.classList.add('hidden');
+});
+
+qrModal?.addEventListener('click', e => {
+  if (e.target === qrModal) qrModal.classList.add('hidden');
+});
+
+btnQrCopyLink?.addEventListener('click', () => {
+  const shareUrl = `${window.location.origin}/?room=${state.roomId}`;
+  navigator.clipboard.writeText(shareUrl).then(() => {
+    showToast('✅ Invite link copied to clipboard!');
+    qrModal?.classList.add('hidden');
+  });
+});
+
+// ─── Fun Music Persona Generator ──────────────────────────────────────────────
+const FUN_PERSONAS = [
+  '🎧 Neon Panda', '⚡ Cosmic Fox', '🎵 Chill Dolphin', '🎷 Retro Wolf',
+  '🎸 Star Beats', '🎹 Lunar Echo', '🥁 Groove Tiger', '🎺 Velvet Vibe',
+  '📻 Cyber Nomad', '🎤 Velvet Sonic', '🎧 Echo Wave', '🔥 Bass Maverick'
+];
+
+function getRandomPersona() {
+  return FUN_PERSONAS[Math.floor(Math.random() * FUN_PERSONAS.length)];
+}
+
+btnRandCreateName?.addEventListener('click', () => {
+  inputCreateName.value = getRandomPersona();
+  inputCreateName.focus();
+});
+
+btnRandJoinName?.addEventListener('click', () => {
+  inputJoinName.value = getRandomPersona();
+  inputJoinName.focus();
+});
+
 // ─── URL Deep-link invite query handling ──────────────────────────────────────
 function checkUrlRoomParam() {
   try {
@@ -1670,10 +1954,13 @@ function checkUrlRoomParam() {
       const clean = roomParam.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
       if (clean && inputRoomCode) {
         inputRoomCode.value = clean;
-        showToast(`🎵 Room code "${clean}" loaded from link!`);
         if (inputJoinName && !inputJoinName.value) {
-          inputJoinName.focus();
+          inputJoinName.value = getRandomPersona();
         }
+        if (btnJoinText) {
+          btnJoinText.textContent = 'Join Party 🎉';
+        }
+        showToast(`🎵 Ready to join party "${clean}"!`);
       }
     }
   } catch (_) {}

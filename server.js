@@ -543,6 +543,83 @@ app.get(['/api/room/:id', '/room/:id'], (req, res, next) => {
   res.json({ exists: true, userCount: room.users.size, maxSize: MAX_ROOM });
 });
 
+// ─── Instant YouTube Search API ───────────────────────────────────────────────
+const searchCache = new Map();
+
+app.get('/api/search', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query || query.length < 2) {
+    return res.json({ results: [] });
+  }
+
+  const cacheKey = query.toLowerCase();
+  if (searchCache.has(cacheKey)) {
+    return res.json({ results: searchCache.get(cacheKey) });
+  }
+
+  try {
+    const args = [
+      '--no-playlist',
+      '--flat-playlist',
+      '--no-check-certificates',
+      '--socket-timeout', '6',
+      '--print', '%(id)s\t%(title)s\t%(duration_string)s',
+      '--',
+      `ytsearch4:${query}`
+    ];
+
+    const proc = spawn('yt-dlp', args);
+    let output = '';
+
+    const killTimer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (_) {}
+    }, 7000);
+
+    proc.stdout.on('data', chunk => { output += chunk.toString(); });
+
+    proc.on('close', () => {
+      clearTimeout(killTimer);
+      const lines = output.split('\n').filter(Boolean);
+      const results = [];
+
+      for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length >= 2) {
+          const id = parts[0].trim();
+          const title = parts[1].trim();
+          const duration = parts[2] ? parts[2].trim() : '';
+          if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) {
+            results.push({
+              id,
+              title,
+              duration,
+              url: `https://www.youtube.com/watch?v=${id}`,
+              thumbnail: `https://i.ytimg.com/vi/${id}/mqdefault.jpg`
+            });
+          }
+        }
+      }
+
+      if (results.length > 0) {
+        if (searchCache.size > 60) {
+          const oldestKey = searchCache.keys().next().value;
+          searchCache.delete(oldestKey);
+        }
+        searchCache.set(cacheKey, results);
+      }
+
+      res.json({ results });
+    });
+
+    proc.on('error', () => {
+      clearTimeout(killTimer);
+      res.json({ results: [] });
+    });
+  } catch (_) {
+    res.json({ results: [] });
+  }
+});
+
 async function getVideoTitle(videoId) {
   if (titleCache.has(videoId)) {
     return titleCache.get(videoId);
@@ -781,6 +858,19 @@ io.on('connection', socket => {
 
   socket.on('ping', () => socket.emit('pong', { serverTime: Date.now() }));
   socket.on('ping-clock', cb => { if (typeof cb === 'function') cb({ serverTime: Date.now() }); });
+
+  // Live floating emoji reaction burst
+  socket.on('send-reaction', ({ roomId, emoji, userName }) => {
+    if (!roomId || !emoji) return;
+    const safeEmoji = String(emoji).slice(0, 10);
+    const safeName = String(userName || 'Someone').slice(0, 25);
+    io.to(roomId.toUpperCase()).emit('reaction', {
+      emoji: safeEmoji,
+      userName: safeName,
+      userId: socket.id,
+      timestamp: Date.now()
+    });
+  });
 
   // Create room
   socket.on('create-room', ({ userName, userToken }, cb) => {
