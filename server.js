@@ -155,12 +155,20 @@ function notifyTrackAdded(roomId, room, trackName, filePath, userName, thumbnail
   const { activated } = addTrackToRoom(room, trackName, filePath, userName, thumbnail);
 
   if (activated) {
+    const now = Date.now();
+    const autoPlay = true;
+    room.isPlaying = autoPlay;
+    const playAt = now + 1000;
+    room.playAt = playAt;
+
     io.to(roomId).emit('track-loaded', {
       trackName,
       thumbnail: room.thumbnail,
       audioUrl: getAudioUrl(roomId, room),
       playlist: room.playlist,
-      currentTrackIndex: room.currentTrackIndex
+      currentTrackIndex: room.currentTrackIndex,
+      autoPlay,
+      playAt
     });
   } else {
     // Add to queue without interrupting current song!
@@ -1181,6 +1189,7 @@ io.on('connection', socket => {
       io.to(room.id).emit('user-status-changed', { users: publicRoom(room).users });
     }
 
+    const shouldAutoPlay = autoPlay !== false;
     const now = Date.now();
     const track = room.playlist[index];
 
@@ -1188,11 +1197,13 @@ io.on('connection', socket => {
     room.audioFile = track.audioFile;
     room.trackName = track.trackName;
     room.thumbnail = track.thumbnail || null;
-    room.isPlaying = false;
+    room.isPlaying = shouldAutoPlay;
     room.position = 0;
     room.positionHistory = [];
     room.serverTimeAtUpdate = now;
-    delete room.playAt;
+
+    const playAt = shouldAutoPlay ? now + 1000 : null;
+    room.playAt = playAt;
 
     io.to(room.id).emit('track-loaded', {
       trackName: track.trackName,
@@ -1200,10 +1211,10 @@ io.on('connection', socket => {
       audioUrl: getAudioUrl(room.id, room),
       playlist: room.playlist,
       currentTrackIndex: room.currentTrackIndex,
-      autoPlay: false,
-      playAt: null
+      autoPlay: shouldAutoPlay,
+      playAt
     });
-    console.log(`[Room ${room.id}] Switched to track #${index}: ${track.trackName} (ready, paused)`);
+    console.log(`[Room ${room.id}] Switched to track #${index}: ${track.trackName} (autoPlay: ${shouldAutoPlay})`);
   });
 
   // Transfer host privileges to another user in the room (Host only)
