@@ -32,6 +32,48 @@ const state = {
   }
 };
 
+// ─── Persistent Browser Audio Cache (CacheStorage API) ─────────────────────────
+const AUDIO_CACHE_NAME = 'syncplay-audio-v1';
+
+async function getCachedAudioBuffer(cacheKey) {
+  if (!('caches' in window) || !cacheKey) return null;
+  try {
+    const cache = await caches.open(AUDIO_CACHE_NAME);
+    const match = await cache.match(cacheKey);
+    if (match) {
+      return await match.arrayBuffer();
+    }
+  } catch (err) {
+    console.warn('[CacheStorage Read]', err);
+  }
+  return null;
+}
+
+async function putCachedAudioBuffer(cacheKey, arrayBuffer) {
+  if (!('caches' in window) || !cacheKey || !arrayBuffer) return;
+  try {
+    const cache = await caches.open(AUDIO_CACHE_NAME);
+    const resp = new Response(arrayBuffer.slice(0), {
+      headers: {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': String(arrayBuffer.byteLength),
+        'X-Cached-At': String(Date.now())
+      }
+    });
+    await cache.put(cacheKey, resp);
+
+    // Limit persistent cache to 12 tracks to protect mobile disk space
+    const keys = await cache.keys();
+    if (keys.length > 12) {
+      for (let i = 0; i < keys.length - 12; i++) {
+        await cache.delete(keys[i]);
+      }
+    }
+  } catch (err) {
+    console.warn('[CacheStorage Write]', err);
+  }
+}
+
 // ─── WebAudio API Engine ───────────────────────────────────────────────────────
 class WebAudioSyncEngine {
   constructor() {
@@ -157,6 +199,31 @@ class WebAudioSyncEngine {
       } catch (_) {}
     }
 
+    // 3. Persistent Disk Cache Hit (CacheStorage API — 0 network bytes!)
+    let persistentBuf = await getCachedAudioBuffer(cacheKey);
+    if (!persistentBuf && url !== cacheKey) {
+      persistentBuf = await getCachedAudioBuffer(url);
+    }
+    if (persistentBuf) {
+      console.log(`[CacheStorage HIT] Instant disk load for: ${cacheKey}`);
+      if (onProgress) onProgress(100, persistentBuf.byteLength, persistentBuf.byteLength);
+      this.buffer = await new Promise((resolve, reject) => {
+        this.ctx.decodeAudioData(
+          persistentBuf,
+          decoded => resolve(decoded),
+          err => reject(err || new Error('Audio decode error'))
+        );
+      });
+      this.duration = this.buffer.duration;
+      this.bufferCache.set(cacheKey, { buffer: this.buffer, duration: this.duration });
+      if (this.pendingPlay) {
+        const p = this.pendingPlay;
+        this.pendingPlay = null;
+        this.playAt(p.position, p.playAtServerTime, p.clockOffset);
+      }
+      return this.duration;
+    }
+
     let res = null;
     let lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -206,6 +273,10 @@ class WebAudioSyncEngine {
       arrayBuf = await res.arrayBuffer();
     }
 
+    // Save to persistent CacheStorage for future instant replays
+    putCachedAudioBuffer(cacheKey, arrayBuf);
+    if (url !== cacheKey) putCachedAudioBuffer(url, arrayBuf);
+
     // Universal compatibility with older iOS WebKit callback and modern Promise
     this.buffer = await new Promise((resolve, reject) => {
       this.ctx.decodeAudioData(
@@ -243,9 +314,25 @@ class WebAudioSyncEngine {
     if (!key || this.bufferCache.has(key) || this.preloadPromises.has(key)) return;
     const promise = (async () => {
       this.init();
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('Preload fetch failed');
-      const arrayBuf = await res.arrayBuffer();
+
+      // Check persistent cache first
+      let arrayBuf = await getCachedAudioBuffer(key);
+      if (!arrayBuf && url !== key) {
+        arrayBuf = await getCachedAudioBuffer(url);
+      }
+
+      // If not in persistent cache, fetch over network
+      if (!arrayBuf) {
+        console.log(`[Smart Preload] Fetching next track in background: ${key}`);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Preload fetch failed');
+        arrayBuf = await res.arrayBuffer();
+        putCachedAudioBuffer(key, arrayBuf);
+        if (url !== key) putCachedAudioBuffer(url, arrayBuf);
+      } else {
+        console.log(`[Smart Preload] Next track found in CacheStorage: ${key}`);
+      }
+
       const buffer = await new Promise((resolve, reject) => {
         this.ctx.decodeAudioData(arrayBuf, resolve, reject);
       });
@@ -256,8 +343,10 @@ class WebAudioSyncEngine {
       }
       this.bufferCache.set(key, data);
       this.preloadPromises.delete(key);
+      console.log(`[Smart Preload] ✅ Next track ready in memory: ${key}`);
       return data;
-    })().catch(() => {
+    })().catch(e => {
+      console.warn('[Smart Preload] Failed:', e.message);
       this.preloadPromises.delete(key);
     });
     this.preloadPromises.set(key, promise);
@@ -767,6 +856,7 @@ function connectSocket() {
       state.playlist = playlist;
       state.currentTrackIndex = currentTrackIndex;
       renderPlaylist(playlist, currentTrackIndex);
+      triggerSmartPreload();
     }
     if (addedTrackName) {
       showToast(`🎶 "${addedTrackName}" added to queue by ${addedBy || 'someone'}`);
@@ -1013,11 +1103,29 @@ async function loadAudio(url, trackName, startPos = 0, onReadyCallback = null, t
     }, 500);
     showToast(`🎵 "${trackName}" ready`);
     if (onReadyCallback) onReadyCallback();
+
+    // Smart Background Pre-Fetching: Queue next track in background after 2 seconds
+    setTimeout(triggerSmartPreload, 2000);
   } catch (err) {
     opProgressWrap.classList.add('hidden');
     console.error('[WebAudio Load Error]', err);
     showToast('❌ Failed to load audio: ' + err.message);
   }
+}
+
+// ─── Smart Background Queue Pre-fetcher ───────────────────────────────────────
+function triggerSmartPreload() {
+  if (!state.playlist || state.playlist.length === 0) return;
+  const nextIdx = state.currentTrackIndex + 1;
+  if (nextIdx >= state.playlist.length) return;
+  const nextTrack = state.playlist[nextIdx];
+  if (!nextTrack) return;
+
+  const nextTrackKey = `${state.roomId}_${nextIdx}_${nextTrack.trackName}`;
+  const nextUrl = `/audio/${state.roomId}?idx=${nextIdx}&t=${encodeURIComponent(nextTrackKey)}`;
+
+  console.log(`[Smart Preload] Pre-fetching next track in queue: "${nextTrack.trackName}"`);
+  audioEngine.preloadTrack(nextUrl, nextTrackKey);
 }
 
 let hostPulseCounter = 0;
@@ -1030,15 +1138,9 @@ function startProgressLoop() {
     scrubFill.style.width = pct + '%';
     displayCurrent.textContent = fmt(curTime);
 
-    // Background Pre-Buffering: Silently preload next track when current song reaches 70% or 25s left
-    if (state.playlist && state.currentTrackIndex + 1 < state.playlist.length && (pct >= 70 || (audioEngine.duration - curTime <= 25))) {
-      const nextIdx = state.currentTrackIndex + 1;
-      const nextTrack = state.playlist[nextIdx];
-      if (nextTrack) {
-        const nextTrackKey = `${state.roomId}_${nextIdx}_${nextTrack.trackName}`;
-        const nextUrl = `/audio/${state.roomId}?idx=${nextIdx}&t=${encodeURIComponent(nextTrackKey)}`;
-        audioEngine.preloadTrack(nextUrl, nextTrackKey);
-      }
+    // Smart Background Pre-Buffering: Silently preload next track as early as 30% progress or 45s left
+    if (state.playlist && state.currentTrackIndex + 1 < state.playlist.length && (pct >= 30 || (audioEngine.duration - curTime <= 45))) {
+      triggerSmartPreload();
     }
 
     // Host emits real-time position pulse every 2 seconds

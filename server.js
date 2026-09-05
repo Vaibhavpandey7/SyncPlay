@@ -296,6 +296,54 @@ try {
   FFMPEG_BIN = 'ffmpeg';
 }
 
+// Compress large audio files (e.g. WAV, FLAC, or high-bitrate MP3) to lightweight 96k MP3 for fast mobile streaming
+async function compressAudioIfLarge(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return filePath;
+  try {
+    const stats = fs.statSync(filePath);
+    // If file is already smaller than 2.5 MB, don't re-encode
+    if (stats.size <= 2.5 * 1024 * 1024) return filePath;
+
+    const outPath = filePath.replace(/\.[^/.]+$/, '') + '_opt.mp3';
+    return await new Promise(resolve => {
+      const proc = spawn(FFMPEG_BIN, [
+        '-y',
+        '-i', filePath,
+        '-vn',
+        '-codec:a', 'libmp3lame',
+        '-b:a', '96k',
+        '-ar', '44100',
+        outPath
+      ]);
+
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        resolve(filePath);
+      }, 25000);
+
+      proc.on('error', () => {
+        clearTimeout(timer);
+        resolve(filePath);
+      });
+
+      proc.on('close', code => {
+        clearTimeout(timer);
+        if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 10000) {
+          const optSize = fs.statSync(outPath).size;
+          console.log(`[Audio Compression] ${path.basename(filePath)} (${(stats.size/1024/1024).toFixed(1)}MB) → ${(optSize/1024/1024).toFixed(1)}MB (-${Math.round((1 - optSize/stats.size)*100)}%)`);
+          try { fs.unlinkSync(filePath); } catch (_) {}
+          resolve(outPath);
+        } else {
+          resolve(filePath);
+        }
+      });
+    });
+  } catch (err) {
+    console.warn('[Audio Compression] Skipped due to:', err.message);
+    return filePath;
+  }
+}
+
 function cachedPath(videoId, ext = 'mp3') {
   return path.join(CACHE, `${videoId}.${ext}`);
 }
@@ -795,10 +843,17 @@ app.post('/upload/:roomId', (req, res) => {
 
     const finalUserName = (req.body && req.body.userName) || rawName || 'Host';
     const trackName = req.file.originalname.replace(/\.[^/.]+$/, '');
-    notifyTrackAdded(roomId, room, trackName, req.file.path, finalUserName);
 
-    console.log(`[Room ${roomId}] File uploaded: ${trackName}`);
-    res.json({ success: true, trackName });
+    // Optimize large uploads for fast mobile downloading on slow networks
+    compressAudioIfLarge(req.file.path).then(finalPath => {
+      notifyTrackAdded(roomId, room, trackName, finalPath, finalUserName);
+      console.log(`[Room ${roomId}] File ready: ${trackName}`);
+      res.json({ success: true, trackName });
+    }).catch(compErr => {
+      console.warn(`[Room ${roomId}] Compression fallback:`, compErr.message);
+      notifyTrackAdded(roomId, room, trackName, req.file.path, finalUserName);
+      res.json({ success: true, trackName });
+    });
   });
 });
 
