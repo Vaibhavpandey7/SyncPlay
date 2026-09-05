@@ -1239,6 +1239,16 @@ async function submitYtUrl() {
   ytError.classList.add('hidden');
   ytSearchResults?.classList.add('hidden');
 
+  if (!state.roomId) {
+    showErr(ytError, 'Please create or join a room first.');
+    return;
+  }
+
+  // Normalize URLs that omitted http/https
+  if (!/^https?:\/\//i.test(url) && /^(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com|m\.youtube\.com)/i.test(url)) {
+    url = 'https://' + url;
+  }
+
   // If input is NOT a direct URL and NOT an 11-char ID, automatically search YouTube and select top match
   const isDirect = url.startsWith('http://') || url.startsWith('https://') || /^[a-zA-Z0-9_-]{11}$/.test(url);
   if (!isDirect) {
@@ -1280,14 +1290,28 @@ async function submitYtUrl() {
       },
       body: JSON.stringify({ url })
     });
-    const data = await res.json();
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {
+      // Non-JSON response (e.g. 502/504 Bad Gateway from cloud provider or HTML error)
+    }
+
     if (!res.ok) {
-      showErr(ytError, data.error || 'Download failed.');
+      const errMsg = (data && data.error) || (res.status === 404 ? 'Room expired or not found. Please rejoin the room.' : `Server error (${res.status})`);
+      showErr(ytError, errMsg);
       opProgressWrap.classList.add('hidden');
+      return;
     }
     // Further progress comes via socket events
   } catch (err) {
-    showErr(ytError, 'Network error. Is the server running?');
+    console.error('[Download error]', err);
+    if (!navigator.onLine) {
+      showErr(ytError, 'You are offline. Please check your internet connection.');
+    } else {
+      showErr(ytError, 'Network error. Could not connect to SyncPlay server.');
+    }
     opProgressWrap.classList.add('hidden');
   } finally {
     btnLoadYt.disabled = false;
@@ -1306,7 +1330,8 @@ let searchDebounceTimer = null;
     const val = (inputYtUrl.value || '').trim();
 
     // If input looks like a URL or video ID, hide search suggestions
-    if (!val || val.startsWith('http://') || val.startsWith('https://') || /^[a-zA-Z0-9_-]{11}$/.test(val)) {
+    const looksLikeUrl = val.startsWith('http://') || val.startsWith('https://') || /^(www\.)?(youtube\.com|youtu\.be)/i.test(val) || /^[a-zA-Z0-9_-]{11}$/.test(val);
+    if (!val || looksLikeUrl) {
       ytSearchResults?.classList.add('hidden');
       return;
     }

@@ -247,13 +247,21 @@ function extractVideoId(input) {
   if (!input || typeof input !== 'string') return null;
   input = input.trim();
   if (YOUTUBE_ID_REGEX.test(input)) return input;
+
+  let urlStr = input;
+  if (!/^https?:\/\//i.test(urlStr)) {
+    urlStr = 'https://' + urlStr;
+  }
+
   try {
-    const u = new URL(input);
+    const u = new URL(urlStr);
     let candidate = null;
     if (u.hostname.includes('youtu.be')) {
       candidate = u.pathname.slice(1).split('/')[0].split('?')[0];
     } else if (u.pathname.startsWith('/shorts/')) {
       candidate = u.pathname.split('/shorts/')[1].split('/')[0].split('?')[0];
+    } else if (u.pathname.startsWith('/live/')) {
+      candidate = u.pathname.split('/live/')[1].split('/')[0].split('?')[0];
     } else if (u.pathname.startsWith('/embed/')) {
       candidate = u.pathname.split('/embed/')[1].split('/')[0].split('?')[0];
     } else {
