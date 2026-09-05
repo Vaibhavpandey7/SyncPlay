@@ -778,10 +778,11 @@ app.post('/download/:roomId', async (req, res) => {
 
   try {
     const { filePath, title } = await downloadAudio(videoId, roomId);
+    const finalPath = await compressAudioIfLarge(filePath);
 
     // Fetch clean title if yt-dlp didn't provide one
     let trackName = title !== videoId ? title : videoId;
-    notifyTrackAdded(roomId, room, trackName, filePath, userName, thumbnail);
+    notifyTrackAdded(roomId, room, trackName, finalPath, userName, thumbnail);
     room.downloading = false;
     console.log(`[Room ${roomId}] Track loaded: ${trackName}`);
   } catch (err) {
