@@ -91,6 +91,8 @@ function makeRoom(id, hostSocketId, hostName, hostToken) {
     positionHistory: [],   // Server-side rolling 5-sample buffer for jitter-free room sync
     hostHardwareLatency: 0, // Hardware audio output latency of Host device
     downloading: false,
+    allOfflineSince: 0,    // Timestamp when all users went offline (0 = at least one user is online)
+    createdAt: Date.now(), // Room creation timestamp for stale-room reaping
     users: new Map([[token, { name: cleanHostName, isHost: true, socketId: hostSocketId, userToken: token, offline: false, isUploading: false, disconnectTimer: null }]])
   };
 }
@@ -834,7 +836,39 @@ app.post('/upload/:roomId', (req, res) => {
   }
 
   upload.single('audio')(req, res, err => {
-    if (uploadingUser) uploadingUser.isUploading = false;
+    if (uploadingUser) {
+      uploadingUser.isUploading = false;
+      // Fix 3a: If user went offline during upload, start the disconnect grace timer now
+      if (uploadingUser.offline && !uploadingUser.disconnectTimer && room) {
+        const userToken = uploadingUser.userToken;
+        console.log(`[Room ${roomId}] Upload finished but user ${uploadingUser.name} is offline — starting grace timer`);
+        uploadingUser.disconnectTimer = setTimeout(() => {
+          const curRoom = rooms.get(roomId);
+          if (!curRoom) return;
+          let curUserKey = null;
+          let curUser = null;
+          for (const [k, u] of curRoom.users.entries()) {
+            if (u.userToken === userToken) { curUserKey = k; curUser = u; break; }
+          }
+          if (!curUser || !curUser.offline || curUser.isUploading) return;
+          const wasHost = curUser.isHost;
+          curRoom.users.delete(curUserKey);
+          console.log(`[Room ${roomId}] ${curUser.name} post-upload grace expired -> removed`);
+          if (curRoom.users.size === 0) { cleanupRoom(roomId); return; }
+          if (wasHost) {
+            const remaining = [...curRoom.users.values()];
+            const creator = curRoom.creatorToken ? curRoom.users.get(curRoom.creatorToken) : null;
+            const nextHost = (creator && !creator.offline) ? creator : (remaining.find(u => !u.offline) || remaining[0]);
+            if (nextHost) {
+              nextHost.isHost = true;
+              curRoom.hostId = nextHost.socketId;
+              curRoom.hostToken = nextHost.userToken;
+            }
+          }
+          io.to(roomId).emit('user-left', { userId: curUser.socketId, name: curUser.name, users: publicRoom(curRoom).users, newHostId: curRoom.hostId });
+        }, RECONNECT_GRACE_MS);
+      }
+    }
 
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -1099,14 +1133,16 @@ io.on('connection', socket => {
   socket.on('play', ({ position }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
+    // Fix 2b: Validate position input
+    const pos = (typeof position === 'number' && Number.isFinite(position) && position >= 0) ? position : 0;
     const now = Date.now();
     const playAt = now + SYNC_DELAY; // scheduled future start time
-    const pos = typeof position === 'number' ? position : 0;
     room.isPlaying = true;
     room.position = pos;
     room.positionHistory = [];
     room.serverTimeAtUpdate = playAt; // Position is valid starting at playAt
     room.playAt = playAt;
+    room.allOfflineSince = 0; // Reset: at least one user is driving playback
     io.to(room.id).emit('play', { position: pos, playAt });
   });
 
@@ -1117,11 +1153,20 @@ io.on('connection', socket => {
     const user = room.users.get(socket.data.userToken);
     if (!user || !user.isHost) return;
 
-    if (typeof hardwareLatency === 'number') {
+    // Fix 2b: Validate position input
+    if (typeof position !== 'number' || !Number.isFinite(position) || position < 0) return;
+
+    // Fix 2c: Reject stale host-pulses (>10s old) — e.g. buffered frames flushed after phone wake
+    const now = Date.now();
+    if (typeof serverTime === 'number' && Math.abs(now - serverTime) > 10000) {
+      console.log(`[Room ${room.id}] Rejected stale host-pulse (age: ${Math.abs(now - serverTime)}ms)`);
+      return;
+    }
+
+    if (typeof hardwareLatency === 'number' && Number.isFinite(hardwareLatency)) {
       room.hostHardwareLatency = hardwareLatency;
     }
 
-    const now = Date.now();
     // Maintain 5-sample rolling history on server. Each entry stores position as-of its capture time.
     room.positionHistory.push({ pos: position, capturedAt: serverTime });
     if (room.positionHistory.length > 5) room.positionHistory.shift();
@@ -1147,8 +1192,10 @@ io.on('connection', socket => {
   socket.on('pause', ({ position }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
+    // Fix 2b: Validate position input
+    const pos = (typeof position === 'number' && Number.isFinite(position) && position >= 0) ? position : room.position;
     room.isPlaying = false;
-    room.position = typeof position === 'number' ? position : room.position;
+    room.position = pos;
     room.positionHistory = [];
     room.serverTimeAtUpdate = Date.now();
     io.to(room.id).emit('pause', { position: room.position });
@@ -1157,9 +1204,10 @@ io.on('connection', socket => {
   socket.on('seek', ({ position }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
+    // Fix 2b: Validate position input
+    const pos = (typeof position === 'number' && Number.isFinite(position) && position >= 0) ? position : 0;
     const now = Date.now();
     const playAt = room.isPlaying ? now + SYNC_DELAY : null;
-    const pos = typeof position === 'number' ? position : 0;
     room.position = pos;
     room.positionHistory = [];
     room.serverTimeAtUpdate = playAt || now;
@@ -1398,8 +1446,39 @@ io.on('connection', socket => {
       return;
     }
 
+    const wasHost = user.isHost;
     user.offline = true;
     console.log(`[Room ${roomId}] ${user.name} went offline (${RECONNECT_GRACE_MS / 1000}s grace window started)`);
+
+    // Fix 1d: If the host disconnects, immediately pause the room for all remaining clients
+    if (wasHost && room.isPlaying) {
+      const now = Date.now();
+      const elapsed = (now - room.serverTimeAtUpdate) / 1000;
+      room.position = room.position + (elapsed > 0 ? elapsed : 0);
+      room.isPlaying = false;
+      room.positionHistory = [];
+      room.serverTimeAtUpdate = now;
+      console.log(`[Room ${roomId}] Host disconnected — auto-paused at position ${room.position.toFixed(2)}s`);
+      io.to(roomId).emit('pause', { position: room.position });
+    }
+
+    // Fix 1a: If ALL users are now offline, auto-pause the room
+    const allOffline = [...room.users.values()].every(u => u.offline);
+    if (allOffline) {
+      if (room.isPlaying) {
+        const now = Date.now();
+        const elapsed = (now - room.serverTimeAtUpdate) / 1000;
+        room.position = room.position + (elapsed > 0 ? elapsed : 0);
+        room.isPlaying = false;
+        room.positionHistory = [];
+        room.serverTimeAtUpdate = now;
+        console.log(`[Room ${roomId}] All users offline — auto-paused at position ${room.position.toFixed(2)}s`);
+      }
+      room.allOfflineSince = room.allOfflineSince || Date.now();
+      console.log(`[Room ${roomId}] All users offline — room marked for GC reaper`);
+    } else {
+      room.allOfflineSince = 0;
+    }
 
     io.to(roomId).emit('user-status-changed', {
       users: publicRoom(room).users
@@ -1407,12 +1486,25 @@ io.on('connection', socket => {
 
     if (user.disconnectTimer) clearTimeout(user.disconnectTimer);
 
+    // Fix 1c: Capture the userToken (stable) instead of relying on userKey which may be stale after re-keying
+    const disconnectingUserToken = user.userToken;
+
     // Grace period before officially removing user / reassigning host
     user.disconnectTimer = setTimeout(() => {
       // Re-verify room and user status before taking destructive action
       const curRoom = rooms.get(roomId);
       if (!curRoom) return;
-      const curUser = curRoom.users.get(userKey) || [...curRoom.users.values()].find(u => u.userToken === user.userToken);
+
+      // Fix 1c: Search by userToken (stable identifier) instead of stale userKey
+      let curUserKey = null;
+      let curUser = null;
+      for (const [k, u] of curRoom.users.entries()) {
+        if (u.userToken === disconnectingUserToken) {
+          curUserKey = k;
+          curUser = u;
+          break;
+        }
+      }
 
       // If user is no longer offline or is actively uploading, do nothing!
       if (!curUser || !curUser.offline || curUser.isUploading) {
@@ -1420,8 +1512,8 @@ io.on('connection', socket => {
         return;
       }
 
-      const wasHost = curUser.isHost;
-      curRoom.users.delete(userKey);
+      const wasHostAtExpiry = curUser.isHost;
+      curRoom.users.delete(curUserKey);
       console.log(`[Room ${roomId}] ${curUser.name} grace period expired -> removed`);
 
       const remainingUsers = [...curRoom.users.values()];
@@ -1431,15 +1523,22 @@ io.on('connection', socket => {
       }
 
       let newHostId = curRoom.hostId;
-      if (wasHost) {
-        const nextOnlineUser = remainingUsers.find(u => !u.offline) || remainingUsers[0];
-        if (nextOnlineUser) {
-          nextOnlineUser.isHost = true;
-          curRoom.hostId = nextOnlineUser.socketId;
-          curRoom.hostToken = nextOnlineUser.userToken;
-          newHostId = nextOnlineUser.socketId;
+      if (wasHostAtExpiry) {
+        // Fix 3b: Prefer room creator for host transfer, then first online user
+        const creator = curRoom.creatorToken ? curRoom.users.get(curRoom.creatorToken) : null;
+        const nextHost = (creator && !creator.offline) ? creator : (remainingUsers.find(u => !u.offline) || remainingUsers[0]);
+        if (nextHost) {
+          remainingUsers.forEach(u => u.isHost = false);
+          nextHost.isHost = true;
+          curRoom.hostId = nextHost.socketId;
+          curRoom.hostToken = nextHost.userToken;
+          newHostId = nextHost.socketId;
         }
       }
+
+      // Update allOfflineSince after user removal
+      const anyOnline = [...curRoom.users.values()].some(u => !u.offline);
+      curRoom.allOfflineSince = anyOnline ? 0 : (curRoom.allOfflineSince || Date.now());
 
       io.to(roomId).emit('user-left', {
         userId: curUser.socketId || socket.id,
@@ -1457,6 +1556,16 @@ setInterval(() => {
   rooms.forEach(room => {
     // If room is playing, has users, and host is not actively sending fresh pulses
     if (room.isPlaying && room.users.size > 0) {
+      // Fix 2a: Skip heartbeat if host is offline — position math will be wrong
+      const hostUser = room.hostToken ? room.users.get(room.hostToken) : null;
+      if (hostUser && hostUser.offline) {
+        return; // Host is offline, don't broadcast phantom sync-pulses
+      }
+
+      // Fix 1a: Skip heartbeat if ALL users are offline
+      const anyOnline = [...room.users.values()].some(u => !u.offline);
+      if (!anyOnline) return;
+
       if (now - (room.lastHostPulseTime || 0) < 4000) {
         return; // Suppress duplicate heartbeat when host pulse is active
       }
@@ -1472,6 +1581,48 @@ setInterval(() => {
     }
   });
 }, 2500);
+
+// ─── Fix 1b: Periodic Stale Room Reaper (30-second GC sweep) ─────────────────
+setInterval(() => {
+  const now = Date.now();
+  const EMPTY_ROOM_MAX_AGE = 5 * 60 * 1000; // 5 minutes for empty rooms with no content
+
+  rooms.forEach((room, roomId) => {
+    // Condition 1: Room has 0 users → delete immediately
+    if (room.users.size === 0) {
+      console.log(`[GC Reaper] Room ${roomId} has 0 users — deleting`);
+      cleanupRoom(roomId);
+      return;
+    }
+
+    // Condition 2: ALL users offline longer than grace period → force cleanup
+    if (room.allOfflineSince > 0 && (now - room.allOfflineSince) > RECONNECT_GRACE_MS + 5000) {
+      console.log(`[GC Reaper] Room ${roomId} all users offline for ${Math.round((now - room.allOfflineSince) / 1000)}s — force-cleaning`);
+      // Clear all disconnect timers
+      for (const u of room.users.values()) {
+        if (u.disconnectTimer) clearTimeout(u.disconnectTimer);
+      }
+      room.users.clear();
+      cleanupRoom(roomId);
+      return;
+    }
+
+    // Condition 3: Empty room (no playlist, no audio) older than 5 minutes
+    if (room.playlist.length === 0 && !room.audioFile && !room.downloading) {
+      if (room.createdAt && (now - room.createdAt) > EMPTY_ROOM_MAX_AGE) {
+        const allOffline = [...room.users.values()].every(u => u.offline);
+        if (allOffline) {
+          console.log(`[GC Reaper] Room ${roomId} is empty/abandoned for ${Math.round((now - room.createdAt) / 1000)}s — deleting`);
+          for (const u of room.users.values()) {
+            if (u.disconnectTimer) clearTimeout(u.disconnectTimer);
+          }
+          room.users.clear();
+          cleanupRoom(roomId);
+        }
+      }
+    }
+  });
+}, 30000);
 
 // Catch-all route to serve index.html for SPA page reloads / custom URLs
 app.get('*', (req, res) => {

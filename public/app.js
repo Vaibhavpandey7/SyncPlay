@@ -24,6 +24,7 @@ const state = {
   playlist: [],
   currentTrackIndex: -1,
   offsetHistory: [], // Rolling 5-sample buffer for network jitter smoothing
+  lastHardSeekTime: 0, // Fix 2f: Timestamp of last hard seek for cooldown debouncing
   sync: {
     startPosition: 0,
     startLocalTime: 0,
@@ -726,25 +727,29 @@ function connectSocket() {
     if (savedRoomId) {
       state.roomId = savedRoomId;
       state.myName = savedName;
-      console.log('[Socket] Rejoining room:', state.roomId);
-      state.socket.emit('join-room', {
-        roomId: state.roomId,
-        userName: state.myName,
-        userToken: getUserToken()
-      }, res => {
-        if (res && res.success) {
-          state.isHost = res.isHost;
-          enterRoom(res.room, res.isHost);
-          hideReconnectBanner();
-          showToast('🟢 Reconnected to room');
-        } else if (res && res.error) {
-          showToast('❌ ' + res.error);
-          state.roomId = null;
-          state.isHost = false;
-          sessionStorage.removeItem('syncplay_room_id');
-          sessionStorage.removeItem('syncplay_user_name');
-          showPage('landing');
-        }
+      console.log('[Socket] Re-syncing clock before rejoin...');
+      // Fix 3d: Sync clock FIRST, then rejoin room for accurate playback alignment
+      syncClock().then(() => {
+        console.log('[Socket] Clock synced. Rejoining room:', state.roomId);
+        state.socket.emit('join-room', {
+          roomId: state.roomId,
+          userName: state.myName,
+          userToken: getUserToken()
+        }, res => {
+          if (res && res.success) {
+            state.isHost = res.isHost;
+            enterRoom(res.room, res.isHost);
+            hideReconnectBanner();
+            showToast('🟢 Reconnected to room');
+          } else if (res && res.error) {
+            showToast('❌ ' + res.error);
+            state.roomId = null;
+            state.isHost = false;
+            sessionStorage.removeItem('syncplay_room_id');
+            sessionStorage.removeItem('syncplay_user_name');
+            showPage('landing');
+          }
+        });
       });
     }
   });
@@ -916,6 +921,9 @@ function connectSocket() {
   state.socket.on('sync-pulse', ({ position, serverTime, isPlaying, hostHardwareLatency }) => {
     if (!isPlaying || state.isSeeking || !audioEngine.duration) return;
 
+    // Fix 2d: Ignore sync-pulses while audio buffer is still loading/decoding
+    if (!audioEngine.buffer) return;
+
     if (state.isHost) {
       audioEngine.resetRate();
       setSyncStatus('host');
@@ -960,10 +968,18 @@ function connectSocket() {
     const absDrift = Math.abs(smoothedDriftMs);
 
     if (absDrift > 500) {
+      // Fix 2f: Debounce hard seeks — skip if last hard seek was <2s ago
+      const now = Date.now();
+      if (now - state.lastHardSeekTime < 2000) {
+        console.log(`[Sync] Suppressed hard seek (cooldown, ${now - state.lastHardSeekTime}ms since last)`);
+        setSyncStatus('syncing', smoothedDriftMs);
+        return;
+      }
       // Zone 3: Hard seek — large drift, instant correction
       audioEngine.playAt(targetPos, Date.now() + state.clockOffset, state.clockOffset);
       audioEngine.resetRate();
       state.offsetHistory = [];
+      state.lastHardSeekTime = now;
       setSyncStatus('syncing', smoothedDriftMs);
       console.log(`[Sync] HARD SEEK drift=${smoothedDriftMs}ms`);
     } else if (absDrift > 150) {
@@ -2126,3 +2142,40 @@ checkUrlRoomParam();
 connectSocket();
 syncClock();
 setInterval(syncClock, 60000); // Background NTP clock re-sync every 60 seconds
+
+// Fix 3c: Visibility change handler for mobile background/foreground transitions
+// When the user locks their phone, switches tabs, or goes to another app,
+// AudioContext suspends and WebSocket may disconnect. This handler recovers gracefully.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    console.log('[Visibility] Page became visible — checking state...');
+
+    // Re-unlock AudioContext (iOS/Android suspend it when backgrounded)
+    audioEngine.unlock();
+
+    // Re-sync clock immediately (mobile radio state changes can shift timing)
+    syncClock().then(() => {
+      console.log('[Visibility] Clock re-synced after foreground');
+    });
+
+    // Reconnect socket if disconnected
+    if (state.socket && !state.socket.connected) {
+      console.log('[Visibility] Socket disconnected — reconnecting...');
+      state.socket.connect();
+    }
+
+    // If we are in a room and playing, check if playback needs realignment
+    if (state.roomId && state.roomIsPlaying && audioEngine.buffer) {
+      // Give clock sync a moment to settle, then check drift
+      setTimeout(() => {
+        if (!audioEngine.isPlaying && audioEngine.buffer && state.roomIsPlaying) {
+          // Audio stopped while backgrounded — the next sync-pulse will catch us up
+          console.log('[Visibility] Audio stopped in background. Waiting for sync-pulse to resume.');
+        }
+      }, 500);
+    }
+  } else {
+    // Going to background: nothing to do. The disconnect handler handles socket loss.
+    console.log('[Visibility] Page going to background');
+  }
+});
