@@ -8,6 +8,7 @@ const fs = require('fs');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn } = require('child_process');
+const compression = require('compression');
 
 process.on('uncaughtException', err => {
   console.error('[UNCAUGHT EXCEPTION]', err);
@@ -23,7 +24,14 @@ const io = new Server(server, {
   pingTimeout: 20000,   // 20s heartbeat timeout for quick detection of dead sockets on mobile/flaky networks
   pingInterval: 10000,  // 10s ping interval for rapid health checks
   connectTimeout: 30000,
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  // Compress WebSocket frames >1KB — reduces bandwidth for sync-pulse payloads by ~60%
+  perMessageDeflate: {
+    threshold: 1024,
+    zlibDeflateOptions: { level: 6 },
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true
+  }
 });
 
 const PORT = process.env.PORT || 3000;
@@ -602,8 +610,66 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
 }
 
 // ─── HTTP Routes ──────────────────────────────────────────────────────────────
+
+// Gzip/Brotli compression for all HTTP responses — biggest single perf win
+// Skips already-compressed audio streams (content-type audio/*) automatically
+app.use(compression({
+  level: 6,   // balanced speed vs ratio (6 is zlib default)
+  threshold: 512, // don't bother compressing responses smaller than 512 bytes
+  filter: (req, res) => {
+    // Skip audio streams — they're already compressed MP3/Opus/AAC
+    if (res.getHeader('Content-Type') && /^audio\//.test(res.getHeader('Content-Type'))) {
+      return false;
+    }
+    return compression.filter(req, res);
+  }
+}));
+
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Static files with smart cache headers:
+// • HTML: no-cache (always revalidate so users get the latest app)
+// • CSS/JS: 7-day cache with ETag for fast repeat visits
+app.use(express.static(path.join(__dirname, 'public'), {
+  maxAge: '7d',
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      // Prevent stale HTML from blocking JS/CSS cache busting
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    } else if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+      res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    }
+  }
+}));
+
+// ─── Simple per-IP rate limiter for expensive endpoints ──────────────────────
+const rateLimitMap = new Map();
+function rateLimit(maxRequests, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const now = Date.now();
+    const entry = rateLimitMap.get(ip);
+    if (!entry || now - entry.windowStart > windowMs) {
+      rateLimitMap.set(ip, { count: 1, windowStart: now });
+      return next();
+    }
+    entry.count++;
+    if (entry.count > maxRequests) {
+      res.setHeader('Retry-After', Math.ceil(windowMs / 1000));
+      return res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    }
+    next();
+  };
+}
+// Prune stale rate-limit entries every 5 minutes to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap.entries()) {
+    if (now - entry.windowStart > 60000) rateLimitMap.delete(ip);
+  }
+}, 5 * 60 * 1000);
 
 // Health check endpoints for Railway / Render container monitors
 app.get(['/health', '/healthz'], (_, res) => res.status(200).send('OK'));
@@ -617,13 +683,17 @@ app.get(['/api/room/:id', '/room/:id'], (req, res, next) => {
   const id = (req.params.id || '').toUpperCase();
   const room = rooms.get(id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
+  // Short public cache — safe for edge CDNs; room state changes quickly
+  res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=2');
   res.json({ exists: true, userCount: room.users.size, maxSize: MAX_ROOM });
 });
 
 // ─── Instant YouTube Search API ───────────────────────────────────────────────
+// Cache entry: { results: [], cachedAt: timestamp }
 const searchCache = new Map();
+const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10-minute TTL — stale results are nearly always identical
 
-app.get('/api/search', async (req, res) => {
+app.get('/api/search', rateLimit(20, 60000), async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query || query.length < 2) {
     return res.json({ results: [] });
@@ -631,7 +701,14 @@ app.get('/api/search', async (req, res) => {
 
   const cacheKey = query.toLowerCase();
   if (searchCache.has(cacheKey)) {
-    return res.json({ results: searchCache.get(cacheKey) });
+    const hit = searchCache.get(cacheKey);
+    // Serve from cache if results are fresh (< 10 minutes old)
+    if (Date.now() - hit.cachedAt < SEARCH_CACHE_TTL_MS) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.json({ results: hit.results });
+    }
+    // Stale — evict and re-fetch
+    searchCache.delete(cacheKey);
   }
 
   try {
@@ -678,11 +755,12 @@ app.get('/api/search', async (req, res) => {
       }
 
       if (results.length > 0) {
-        if (searchCache.size > 60) {
+        // Evict oldest entries when cache exceeds 100 entries
+        if (searchCache.size >= 100) {
           const oldestKey = searchCache.keys().next().value;
           searchCache.delete(oldestKey);
         }
-        searchCache.set(cacheKey, results);
+        searchCache.set(cacheKey, { results, cachedAt: Date.now() });
       }
 
       res.json({ results });

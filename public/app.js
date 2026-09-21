@@ -4,6 +4,19 @@
 ═══════════════════════════════════════════════════════════ */
 'use strict';
 
+// ─── Performance Utilities ────────────────────────────────────────────────────
+/**
+ * Returns a debounced version of fn that only fires after `wait` ms of silence.
+ * Immediate-mode (leading edge) is NOT used — all calls are trailing-edge.
+ */
+function debounce(fn, wait) {
+  let timer = null;
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), wait);
+  };
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const state = {
   socket: null,
@@ -1228,6 +1241,14 @@ btnMute?.addEventListener('click', toggleMute);
 
 if (volumeSlider) {
   volumeSlider.value = !isNaN(state.volume) ? state.volume : 1;
+
+  // Debounced localStorage write (50ms) — the audio gain is set immediately on
+  // every input event for smooth real-time response, but the heavyweight
+  // localStorage.setItem is deferred so it only fires once the user stops dragging.
+  const saveVolume = debounce((v) => {
+    try { localStorage.setItem('syncplay_volume', String(v)); } catch (_) {}
+  }, 50);
+
   volumeSlider.addEventListener('input', () => {
     const v = parseFloat(volumeSlider.value);
     audioEngine.setVolume(v);
@@ -1235,7 +1256,7 @@ if (volumeSlider) {
       state.isMuted = false;
       btnMute?.classList.remove('muted');
     }
-    try { localStorage.setItem('syncplay_volume', String(v)); } catch (_) {}
+    saveVolume(v);
   });
 }
 
@@ -1293,12 +1314,20 @@ if (offsetSlider && offsetDisplay) {
   offsetSlider.value = state.audioOffsetMs;
   const sign = state.audioOffsetMs > 0 ? '+' : '';
   offsetDisplay.textContent = `${sign}${state.audioOffsetMs} ms`;
+
+  // The display label updates instantly on every tick for live feedback.
+  // The expensive state reset + localStorage write is debounced to 100ms
+  // so we don't thrash the sync engine while the user is still dragging.
+  const applyOffset = debounce((ms) => {
+    state.offsetHistory = []; // Reset moving average so new offset takes effect immediately
+    try { localStorage.setItem('syncplay_audio_offset', String(ms)); } catch (_) {}
+  }, 100);
+
   offsetSlider.addEventListener('input', () => {
     state.audioOffsetMs = parseInt(offsetSlider.value, 10);
     const sign = state.audioOffsetMs > 0 ? '+' : '';
     offsetDisplay.textContent = `${sign}${state.audioOffsetMs} ms`;
-    state.offsetHistory = []; // Reset moving average so new offset takes effect immediately
-    try { localStorage.setItem('syncplay_audio_offset', String(state.audioOffsetMs)); } catch (_) {}
+    applyOffset(state.audioOffsetMs);
   });
 }
 
@@ -1606,10 +1635,23 @@ function uploadFile(file) {
 
 // ─── Render Users & Playlist ──────────────────────────────────────────────────
 
+// Signature used to skip identical re-renders of the user list.
+// Socket events fire frequently; without diffing, every heartbeat would rebuild
+// all <li> nodes even when nothing visually changed.
+let _lastUsersSig = '';
+
 function renderUsers(users) {
+  // Build a quick signature to detect changes before touching the DOM
+  const myToken = getUserToken();
+  const newSig = users.map(u =>
+    `${u.id}|${u.name}|${u.isHost}|${u.offline}|${u.userToken === myToken}`
+  ).join(',');
+
+  if (newSig === _lastUsersSig) return; // Nothing changed — skip full DOM rebuild
+  _lastUsersSig = newSig;
+
   usersList.innerHTML = '';
   userCount.textContent = users.length;
-  const myToken = getUserToken();
 
   users.forEach(u => {
     const li = document.createElement('li');
@@ -1644,10 +1686,22 @@ function renderUsers(users) {
   });
 }
 
+// Signature used to skip identical re-renders of the playlist.
+// The playlist rarely changes but socket events (sync-pulse, etc.) can
+// indirectly trigger renderPlaylist with the same data — diffing avoids
+// unnecessary layout thrash for long queues.
+let _lastPlaylistSig = '';
+
 function renderPlaylist(playlist, currentIndex) {
   if (!playlistList || !playlistCount) return;
   state.playlist = playlist || [];
   state.currentTrackIndex = currentIndex;
+
+  // Build a cheap signature: track IDs + current index + host status
+  const newSig = `${currentIndex}|${state.isHost}|` + (playlist || []).map(t => t.id).join(',');
+  if (newSig === _lastPlaylistSig) return; // Nothing meaningful changed
+  _lastPlaylistSig = newSig;
+
   playlistList.innerHTML = '';
   playlistCount.textContent = playlist ? playlist.length : 0;
 
@@ -1661,8 +1715,9 @@ function renderPlaylist(playlist, currentIndex) {
     const isCurrent = idx === currentIndex;
     li.className = 'playlist-item' + (isCurrent ? ' active' : '');
     const delBtnHtml = state.isHost ? `<button class="btn-del-track" title="Remove track">✕</button>` : '';
+    // lazy loading on thumbnails — defers off-screen image fetches
     const iconHtml = track.thumbnail
-      ? `<img src="${esc(track.thumbnail)}" class="playlist-thumb" alt="art" />`
+      ? `<img src="${esc(track.thumbnail)}" class="playlist-thumb" alt="art" loading="lazy" />`
       : `<div class="playlist-icon">${isCurrent ? '▶' : (idx + 1)}</div>`;
 
     li.innerHTML = `
