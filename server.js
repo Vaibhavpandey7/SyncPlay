@@ -1142,6 +1142,11 @@ io.on('connection', socket => {
       user.isUploading = false;
       if (cleanName) user.name = cleanName;
 
+      // BUG FIX 1: Reset allOfflineSince — user is back online, cancel GC reaper countdown.
+      // Previously this was not reset here, so the GC reaper would still delete the room
+      // even if a user successfully reconnected within the grace window.
+      room.allOfflineSince = 0;
+
       // If user was creator or host, or only online user, restore host status!
       if (token === room.creatorToken || token === room.hostToken || user.isHost || [...room.users.values()].filter(u => !u.offline).length <= 1) {
         if (token === room.creatorToken) {
@@ -1172,6 +1177,10 @@ io.on('connection', socket => {
       socket.join(id);
       socket.data.roomId = id;
       socket.data.userToken = token;
+
+      // BUG FIX 1 (new join path): A new guest joining also means the room has at least one
+      // online user — reset allOfflineSince to cancel any pending GC reaper countdown.
+      room.allOfflineSince = 0;
 
       socket.to(id).emit('user-joined', {
         userId: socket.id, name: cleanName,
@@ -1675,6 +1684,17 @@ setInterval(() => {
 
     // Condition 2: ALL users offline longer than grace period → force cleanup
     if (room.allOfflineSince > 0 && (now - room.allOfflineSince) > RECONNECT_GRACE_MS + 5000) {
+      // BUG FIX 2: Verify users are *actually* still all offline before destroying the room.
+      // allOfflineSince can be stale if a user reconnected but allOfflineSince wasn't reset
+      // (e.g. via a code path that didn't call the join-room handler). This is the last
+      // safety net against false-positive room deletion.
+      const anyOnlineNow = [...room.users.values()].some(u => !u.offline);
+      if (anyOnlineNow) {
+        console.log(`[GC Reaper] Room ${roomId} has allOfflineSince set but a live user was found — resetting stale flag.`);
+        room.allOfflineSince = 0;
+        return;
+      }
+
       console.log(`[GC Reaper] Room ${roomId} all users offline for ${Math.round((now - room.allOfflineSince) / 1000)}s — force-cleaning`);
       // Clear all disconnect timers
       for (const u of room.users.values()) {
