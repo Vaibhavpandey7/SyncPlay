@@ -104,6 +104,7 @@ class WebAudioSyncEngine {
     this.isPlaying = false;
     this.duration = 0;
     this.onEnded = null;
+    this.endedFallbackTimer = null; // Wall-clock fallback to fire onEnded if source.onended is suppressed
     this.volume = !isNaN(state.volume) ? Math.max(0, Math.min(1, state.volume)) : 1.0;
     this.pendingPlay = null;  // Queued play request while buffer is fetching/decoding
     this.isUnlocked = false;
@@ -394,10 +395,21 @@ class WebAudioSyncEngine {
     this.source.buffer = this.buffer;
     this.source.connect(this.gainNode);
 
+    // Flag to prevent double-firing if both the native event and the fallback fire
+    let endedFired = false;
+    const fireEnded = (source) => {
+      if (endedFired) return;
+      endedFired = true;
+      this.endedFallbackTimer = null;
+      this.isPlaying = false;
+      console.log(`[AudioEngine] onEnded fired via ${source}`);
+      if (this.onEnded) this.onEnded();
+    };
+
     this.source.onended = () => {
+      // Guard: only fire if we're still tracking this as a live playback
       if (this.isPlaying) {
-        this.isPlaying = false;
-        if (this.onEnded) this.onEnded();
+        fireEnded('native source.onended');
       }
     };
 
@@ -406,6 +418,19 @@ class WebAudioSyncEngine {
     this.startPosition = startPos;
     this.isPlaying = true;
     this.updateUnlockUI();
+
+    // Wall-clock fallback: if source.onended is ever nullified (e.g. by a sync stop() call
+    // happening at the same millisecond the track finishes), this timer ensures onEnded
+    // still fires. Add a 1.5s grace window beyond the expected end time.
+    const remainingSec = Math.max(0, this.duration - startPos);
+    const remainingMs = remainingSec * 1000;
+    if (this.endedFallbackTimer) clearTimeout(this.endedFallbackTimer);
+    this.endedFallbackTimer = setTimeout(() => {
+      if (this.isPlaying) {
+        console.log('[AudioEngine] onEnded fired via wall-clock fallback (source.onended was suppressed)');
+        fireEnded('wall-clock fallback');
+      }
+    }, remainingMs + 1500);
   }
 
   pause(position = null) {
@@ -419,6 +444,11 @@ class WebAudioSyncEngine {
   }
 
   stop() {
+    // Clear wall-clock fallback before nullifying source.onended
+    if (this.endedFallbackTimer) {
+      clearTimeout(this.endedFallbackTimer);
+      this.endedFallbackTimer = null;
+    }
     if (this.source) {
       this.source.onended = null;  // ← CRITICAL: prevent stale onended from firing after stop()
       try { this.source.stop(); } catch (_) {}
