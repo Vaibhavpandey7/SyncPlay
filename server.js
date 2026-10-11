@@ -421,8 +421,8 @@ async function downloadViaConverterAPI(videoId, roomId) {
   let downloadUrl = null;
   const title = startData.title || startData.info?.title || videoId;
 
-  // Poll for completion (up to 30 attempts, 1.5s interval = max ~45s)
-  for (let i = 0; i < 30; i++) {
+  // Poll for completion (up to 20 attempts, 1.5s interval = max ~30s)
+  for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 1500));
     io.to(roomId).emit('download-progress', {
       percent: Math.min(25 + i * 2, 85),
@@ -538,11 +538,11 @@ function executeYtdlp(videoId, roomId, client, useCookies, fromBrowser) {
     let titleCaptured = false;
     let lastStderr = '';
 
-    // Hard kill if stalled longer than 22 seconds
+    // Hard kill if stalled longer than 12 seconds
     const killTimer = setTimeout(() => {
       try { proc.kill('SIGKILL'); } catch (_) {}
-      reject(new Error('yt-dlp download timed out after 22s'));
-    }, 22000);
+      reject(new Error('yt-dlp download timed out after 12s'));
+    }, 12000);
 
     proc.stdout.on('data', chunk => {
       const lines = chunk.toString().split('\n').filter(Boolean);
