@@ -1195,8 +1195,16 @@ function triggerSmartPreload() {
 }
 
 let hostPulseCounter = 0;
+
+// Pulse every 500ms when the tab is visible (tight sync), every 2000ms when hidden
+// (browsers throttle background intervals to ~1s anyway, so 4-tick cadence is fine)
+function getHostPulseEvery() {
+  return document.hidden ? 4 : 1; // multiples of the 500ms base tick
+}
+
 function startProgressLoop() {
   clearInterval(state.progressInterval);
+  hostPulseCounter = 0; // reset counter so first pulse fires immediately
   state.progressInterval = setInterval(() => {
     if (state.isSeeking || !audioEngine.duration) return;
     const curTime = audioEngine.getCurrentTime();
@@ -1209,17 +1217,20 @@ function startProgressLoop() {
       triggerSmartPreload();
     }
 
-    // Host emits real-time position pulse every 2 seconds
+    // Host emits real-time position pulse at an adaptive rate:
+    //   • 500ms  when tab is visible  → tightest possible sync for listeners
+    //   • 2000ms when tab is hidden   → battery/CPU friendly; server fallback heartbeat covers the gap
     // serverTime = current server epoch: Date.now() + clockOffset
     // hardwareLatency = host device speaker hardware output latency (seconds)
     if (state.isHost && audioEngine.isPlaying && state.socket) {
       hostPulseCounter++;
-      if (hostPulseCounter % 4 === 0) {
+      if (hostPulseCounter % getHostPulseEvery() === 0) {
         state.socket.emit('host-pulse', {
           position: curTime,
           serverTime: Date.now() + state.clockOffset,
           hardwareLatency: audioEngine.getHardwareLatency()
         });
+        hostPulseCounter = 0; // prevent unbounded growth
       }
     }
   }, 500);
@@ -2256,6 +2267,14 @@ document.addEventListener('visibilitychange', () => {
       state.socket.connect();
     }
 
+    // Restart the progress loop so the host-pulse rate immediately switches
+    // from the background cadence (2000ms) to the foreground cadence (500ms).
+    // Also resets hostPulseCounter so the first pulse fires on the very next tick.
+    if (audioEngine.buffer && audioEngine.duration) {
+      console.log('[Visibility] Restarting progress loop at foreground pulse rate (500ms).');
+      startProgressLoop();
+    }
+
     // If we are in a room and playing, check if playback needs realignment
     if (state.roomId && state.roomIsPlaying && audioEngine.buffer) {
       // Give clock sync a moment to settle, then check drift
@@ -2267,7 +2286,8 @@ document.addEventListener('visibilitychange', () => {
       }, 500);
     }
   } else {
-    // Going to background: nothing to do. The disconnect handler handles socket loss.
-    console.log('[Visibility] Page going to background');
+    // Going to background: switch to low-frequency pulse mode automatically
+    // (getHostPulseEvery() will return 4 since document.hidden becomes true).
+    console.log('[Visibility] Page going to background — host-pulse rate reduced to 2000ms.');
   }
 });
