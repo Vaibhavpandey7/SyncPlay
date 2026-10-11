@@ -1182,7 +1182,9 @@ io.on('connection', socket => {
       // online user — reset allOfflineSince to cancel any pending GC reaper countdown.
       room.allOfflineSince = 0;
 
-      socket.to(id).emit('user-joined', {
+      // io.to() (not socket.to()) so the joiner themselves also receives
+      // the updated user list and can render it immediately.
+      io.to(id).emit('user-joined', {
         userId: socket.id, name: cleanName,
         users: publicRoom(room).users
       });

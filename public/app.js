@@ -839,11 +839,18 @@ function connectSocket() {
       showToast(`🟢 ${reconnectedName} reconnected`);
     }
 
+    _lastUsersSig = ''; // Force re-render — socket IDs change on reconnect
     renderUsers(users);
   });
 
-  state.socket.on('user-joined', ({ name, users }) => { renderUsers(users); showToast(`🎵 ${name} joined`); });
+  state.socket.on('user-joined', ({ name, users }) => {
+    _lastUsersSig = ''; // Force re-render on every join
+    renderUsers(users);
+    // Only show toast if this isn't our own join event
+    if (name !== state.myName) showToast(`🎵 ${name} joined`);
+  });
   state.socket.on('user-left',   ({ name, users, newHostId }) => {
+    _lastUsersSig = ''; // Force re-render on every leave
     renderUsers(users);
     showToast(`👋 ${name} left`);
     if (newHostId === state.socket.id && !state.isHost) {
